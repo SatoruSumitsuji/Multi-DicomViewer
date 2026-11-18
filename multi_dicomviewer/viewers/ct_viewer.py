@@ -10518,6 +10518,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
             if getattr(self, "_lv_husnap_btn", None) is not None:
                 self._lv_husnap_btn.setStyleSheet(self._BTN_DIS)
+            if getattr(self, "_lv_saxspl_btn", None) is not None:
+                self._lv_saxspl_btn.setStyleSheet(self._BTN_DIS)
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
@@ -10611,11 +10613,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         _epi_ok = bool(contour and len(m.epi_contours) >= 3)
         if getattr(self, "_lv_husnap_btn", None) is not None:
             self._lv_husnap_btn.setEnabled(_epi_ok)
+            # (user 2026-11-18) HU＋スプライン補正 runs once on entering SAX;
+            # re-running it would undo the hand edits → a quiet grey ("usable,
+            # normally not"). スプライン補正 is the button of the manual stage
+            # → the prominent orange once the HU pass is done.
             self._lv_husnap_btn.setStyleSheet(
-                ("QPushButton{background:#e0a030;color:black;}" + self._BTN_DIS)
-                if lv["model"].epi_hu_done else self._BTN_DIS)
+                "QPushButton{background:#c4c4c4;color:#303030;}" + self._BTN_DIS)
         if getattr(self, "_lv_saxspl_btn", None) is not None:
             self._lv_saxspl_btn.setEnabled(_epi_ok)
+            self._lv_saxspl_btn.setStyleSheet(
+                ("QPushButton{background:#e0a030;color:black;}" + self._BTN_DIS)
+                if lv["model"].epi_hu_done else self._BTN_DIS)
         # Fit MV needs a traced border AND a common MV plane to converge onto.
         if getattr(self, "_lv_fit_mv_btn", None) is not None:
             self._lv_fit_mv_btn.setEnabled(

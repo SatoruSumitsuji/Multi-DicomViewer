@@ -1633,6 +1633,16 @@ class MainWindow(QMainWindow):
         ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
+        # Cal-Measure (user 2026-11-18): calibrate first (2 points / catheter /
+        # DICOM), then distance / polyline length / FWHM diameter — kept apart
+        # from the ordinary Measure (which trusts the DICOM pixel size).
+        self._calmeas_act = QAction(t("Cal-Measure…"), self)
+        self._calmeas_act.setToolTip(t(
+            "Calibrate the image of the active pane (2 points / catheter / "
+            "DICOM) and measure distance, polyline length and FWHM diameter "
+            "(XA, echo and other 2-D series); saved as .CalMeas.json"))
+        self._calmeas_act.triggered.connect(self._open_calmeas)
+        tm.addAction(self._calmeas_act)
         self._syncview_act = QAction(t("SyncView"), self)
         self._syncview_act.setCheckable(True)
         self._syncview_act.setToolTip(t(
@@ -1838,6 +1848,44 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             t("LV-CoSync 開始: 2つのCTを同一縮尺・G同時ページング(mm)で連動。"
               "左室長補正で分率連動に切替。"), 6000)
+
+    def _open_calmeas(self) -> None:
+        """Tools ▸ Cal-Measure: hand the series of the active pane (every
+        frame; the plane(s) it shows) to the Cal-Measure window, starting on
+        the frame shown."""
+        from multi_dicomviewer.ui.calmeas_window import CalMeasWindow
+        v = (self._active.current_viewer()
+             if getattr(self, "_active", None) is not None else None)
+        if (v is None or getattr(v, "handles_modality", "") != "XA"
+                or not getattr(v, "_planes", None)):
+            QMessageBox.information(
+                self, t("Cal-Measure"),
+                t("Cal-Measure は XA・エコーなどの 2D 画像のペインで使います。"
+                  "対象の画像を表示したペインを選んでから実行してください。"))
+            return
+        shown = v._shown_planes()
+        planes = [{"plane": pl, "index": v._planes.index(pl),
+                   "name": str(getattr(pl, "name", "") or "")}
+                  for pl in shown]
+        title = ""
+        try:
+            title = v.title_label.text().split("   |")[0].strip()
+        except Exception:                                # noqa: BLE001
+            title = ""
+        ds = getattr(shown[0], "_ds", None)
+        mod = str(getattr(ds, "Modality", "") or "") if ds is not None else ""
+        win = CalMeasWindow(
+            planes, frame=int(getattr(v, "_frame", 0)),
+            window=(None if getattr(v, "_is_color", False)
+                    else getattr(v, "_window", None)),
+            level=(None if getattr(v, "_is_color", False)
+                   else getattr(v, "_level", None)),
+            title=title, series_uid=str(getattr(v, "_loaded_uid", "") or ""),
+            modality=mod, parent=self)
+        self._calmeas_wins = [w for w in getattr(self, "_calmeas_wins", [])
+                              if w.isVisible()] + [win]
+        win.show()
+        win.raise_()
 
     def _open_coreg(self) -> None:
         """Tools ▸ MultiReg — the IVUS / XA / coronary-CT co-registration window
