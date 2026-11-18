@@ -1710,6 +1710,15 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.scrollToItem(it)
         self._push_overlay()
 
+    def _bundle_uid(self, vid: str):
+        """The CT bundle key owning *vid*, or None. Unlike _ct_of_vessel the
+        key may be "" (a CT without a SeriesInstanceUID still has a bundle),
+        so separate / connect / 自動追跡 work there too."""
+        for uid, b in self._by_uid.items():
+            if vid in b["tree"].vessels:
+                return uid
+        return None
+
     def _ct_of_vessel(self, vid: str) -> str:
         """Which CT bundle owns a vid (first match); "" if none."""
         for uid, b in self._by_uid.items():
@@ -3158,8 +3167,8 @@ class CoronaryTreeWindow(SnapDock):
         (NN, its NN.cpr.json next to the original file, else in *folder*),
         attached to the proximal end, taking the side branches beyond the
         cut. Returns the new vessel id, or "" (with a message)."""
-        uid = self._ct_of_vessel(vid)
-        if not uid:
+        uid = self._bundle_uid(vid)
+        if uid is None:
             return ""
         self._use_uid(uid)
         b = self._bundle()
@@ -3242,8 +3251,8 @@ class CoronaryTreeWindow(SnapDock):
         bridged along the contrast lumen when the CT is given (straight
         otherwise), its side branches re-attached, its file moved to a
         _merged folder. Returns the kept vessel id, or "" (with a message)."""
-        uid = self._ct_of_vessel(a)
-        if not uid or uid != self._ct_of_vessel(b_) or a == b_:
+        uid = self._bundle_uid(a)
+        if uid is None or uid != self._bundle_uid(b_) or a == b_:
             self._warn(t("同じ CT の別々の 2 本の線の端を選んでください。"))
             return ""
         self._use_uid(uid)
@@ -3355,8 +3364,8 @@ class CoronaryTreeWindow(SnapDock):
         own line (next serial NN, its NN.cpr.json next to *vid*'s file),
         hung on its parent (``seg.parent`` = -1 → *vid*, else that earlier
         segment) at the nearest sample. Returns the new vessel ids."""
-        uid = self._ct_of_vessel(vid)
-        if not uid or not segments:
+        uid = self._bundle_uid(vid)
+        if uid is None or not segments:
             return []
         self._use_uid(uid)
         b = self._bundle()
@@ -3399,13 +3408,13 @@ class CoronaryTreeWindow(SnapDock):
         return made
 
     def auto_extend(self, vid: str, vol, dims, folder: str = "",
-                    cancel=None) -> dict | None:
-        """「ここから自動追跡」 on a registered line: extend vessel *vid*
+                    cancel=None, progress=None) -> dict | None:
+        """Auto-Track on a registered line: extend vessel *vid*
         distally through the lumen (its file rewritten) and add every branch
         met on the way as its own line. {"trunk_mm", "branches", "stop"}."""
         from multi_dicomviewer.core.cpr_autoextend import extend_vessel
-        uid = self._ct_of_vessel(vid)
-        if not uid or vol is None or dims is None:
+        uid = self._bundle_uid(vid)
+        if uid is None or vol is None or dims is None:
             return None
         self._use_uid(uid)
         b = self._bundle()
@@ -3415,7 +3424,7 @@ class CoronaryTreeWindow(SnapDock):
             return None
         ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
                           else v.points, float)
-        res = extend_vessel(vol, dims, ctrl, cancel=cancel)
+        res = extend_vessel(vol, dims, ctrl, cancel=cancel, progress=progress)
         trunk_mm = 0.0
         if res.trunk is not None:
             add = np.asarray(res.trunk.ctrl, float)[1:]
@@ -3436,18 +3445,23 @@ class CoronaryTreeWindow(SnapDock):
             self._populate()
             self.treeChanged.emit()
             self._push_overlay()
-        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop}
+        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
+               "found": len(res.branches),
+               "lost": len(res.branches) - len(made)}
         self._hint.setText(self.auto_extend_text(v.name, out))
         return out
 
     @classmethod
     def auto_extend_text(cls, name, out) -> str:
+        lost = int(out.get("lost", 0) or 0)
+        tail = ("\n" + t("⚠ 見つかった分枝 {k} 本を登録できませんでした。", k=lost)
+                if lost else "")
         if not out["trunk_mm"] and not out["branches"]:
             return t("「{n}」: 追跡できる内腔が見つかりませんでした（{s}）。",
-                     n=name, s=cls.stop_text(out["stop"]))
+                     n=name, s=cls.stop_text(out["stop"])) + tail
         return t("「{n}」を {mm:.0f} mm 延長、分枝 {k} 本を追加しました"
                  "（幹の停止: {s}）。", n=name, mm=out["trunk_mm"],
-                 k=len(out["branches"]), s=cls.stop_text(out["stop"]))
+                 k=len(out["branches"]), s=cls.stop_text(out["stop"])) + tail
 
     def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
         """Replace a vessel's centreline (ctrl + resampled points) and re-snap the

@@ -32,8 +32,9 @@ app = QApplication.instance() or QApplication([])
 from multi_dicomviewer.core import settings  # noqa: E402
 
 assert str(settings.SETTINGS_DIR).startswith(HOME), settings.SETTINGS_DIR
-QMessageBox.warning = staticmethod(lambda *a, **k: None)
-QMessageBox.information = staticmethod(lambda *a, **k: None)
+shown = []
+QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(("warn", a)))
+QMessageBox.information = staticmethod(lambda *a, **k: shown.append(("info", a)))
 from multi_dicomviewer.core.centerline import CenterLine  # noqa: E402
 from multi_dicomviewer.core.cpr_autoextend import extend_vessel  # noqa: E402
 from multi_dicomviewer.ui.coronary_tree_window import CoronaryTreeWindow  # noqa: E402
@@ -242,11 +243,40 @@ check("viewer: the line is extended in place (one undo step)",
 check("viewer: saved + its branch registered on it",
       h.saved == 1 and ("branches", p01, 1) in h.sh.calls
       and res["branches"] == ["x1"], h.sh.calls)
+# progress reported while tracing (trunk mm, then branch k / n)
+stages = []
+extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(
+    (st, k, n)))
+check("progress: trunk then each branch reported",
+      any(x[0] == "trunk" for x in stages)
+      and ("branch", 1, 1) in stages, stages[-3:])
+# a CT whose bundle key is "" (no SeriesInstanceUID): branches still added
+w._by_uid[""] = w._by_uid.pop(UID)
+w._use_uid("")
+n0 = len(w._bundle()["tree"].vessels)
+res2 = extend_vessel(VY, D3, ctrl)
+made2 = w.add_auto_branches("lad", res2.branches)
+check("CT without a UID: branches still registered (was the silent drop)",
+      len(made2) == 1 and len(w._bundle()["tree"].vessels) == n0 + 1)
+# no shell: the result still shows in a dialog; an error shows too
+h2 = Host()
+h2._ct_mode_shell = lambda: None
+shown.clear()
+h2._cpr_autotrack("B", 0)
+check("result always shown in a dialog (no shell)",
+      shown and shown[-1][0] == "info" and "Auto-Track" in shown[-1][1][1])
+h3 = Host()
+h3._vol = None
+shown.clear()
+h3._cpr_autotrack("B", 0)
+check("an error is shown, not swallowed",
+      shown and shown[-1][0] == "warn")
 for nm in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     s = (ROOT / "multi_dicomviewer/viewers" / nm).read_text(encoding="utf-8")
     check(f"{nm}: handle menu offers 自動追跡",
           "self._cpr_autotrack_ok(which, mi, vi)" in s
-          and "self._cpr_autotrack(which, mi)" in s)
+          and "self._cpr_autotrack(which, mi)" in s
+          and 't("Auto-Track")' in s)
 s = (ROOT / "multi_dicomviewer/ui/main_window.py").read_text(encoding="utf-8")
 check("shell: auto-extend entry points",
       "def coronary_auto_extend" in s and "def coronary_add_auto_branches" in s)

@@ -3996,9 +3996,7 @@ class MainWindow(QMainWindow):
             return ""
 
     def coronary_auto_extend(self, viewer, vid: str):
-        """A registered tree line's 「ここから自動追跡」 on *viewer*'s CT."""
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QApplication
+        """A registered tree line's Auto-Track on *viewer*'s CT."""
         w = getattr(self, "_corotree_win", None)
         if w is None or not hasattr(w, "auto_extend"):
             return None
@@ -4008,13 +4006,19 @@ class MainWindow(QMainWindow):
                 "paths", {}).get(vid, "") or ""
         except Exception:                                # noqa: BLE001
             path = ""
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        from multi_dicomviewer.ui.autotrack_progress import (
+            AutoTrackProgress, show_result)
         try:
-            out = w.auto_extend(vid, getattr(viewer, "_vol", None),
-                                getattr(viewer, "_dims", None),
-                                folder=self._viewer_next_dir(viewer))
-        finally:
-            QApplication.restoreOverrideCursor()
+            with AutoTrackProgress(self) as pg:
+                out = w.auto_extend(vid, getattr(viewer, "_vol", None),
+                                    getattr(viewer, "_dims", None),
+                                    folder=self._viewer_next_dir(viewer),
+                                    cancel=pg.cancelled, progress=pg.update)
+        except Exception as exc:                         # noqa: BLE001
+            traceback.print_exc()
+            show_result(self, t("Auto-Track でエラーが発生しました: {e}",
+                                e=f"{type(exc).__name__}: {exc}"), ok=False)
+            return None
         if out and path and hasattr(viewer, "_cpr_retire_stale_copies"):
             try:
                 viewer._cpr_retire_stale_copies(path)
@@ -4065,7 +4069,11 @@ class MainWindow(QMainWindow):
             pass
         sb = self.statusBar() if hasattr(self, "statusBar") else None
         if sb is not None:
-            sb.showMessage(txt, 15000)
+            sb.showMessage(txt.replace("\n", " "), 15000)
+        from multi_dicomviewer.ui.autotrack_progress import show_result
+        show_result(self, txt,
+                    ok=not out.get("lost") and bool(out["trunk_mm"]
+                                                    or out["branches"]))
 
     def _ct_leave_to_standard(self, viewer, kinds) -> None:
         """Before *kinds* stop being loaded on *viewer*: leave a mode that

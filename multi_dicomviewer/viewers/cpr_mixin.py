@@ -845,7 +845,7 @@ class CPRMixin:
         auto_act = None
         if (vid is not None and shell is not None
                 and hasattr(shell, "coronary_auto_extend")):
-            auto_act = menu.addAction(t("ここから自動追跡（遠位へ・分枝も）"))
+            auto_act = menu.addAction(t("Auto-Track"))
             auto_act.setEnabled(
                 vid != (getattr(self, "_coro_edit_vid", "") or ""))
         names = getattr(self, "_coro_names", set())
@@ -2369,13 +2369,14 @@ class CPRMixin:
     # ---- 自動追跡 (user 2026-11-18) -------------------------------------------
     def _coro_auto_extend(self, vid) -> bool:
         """A registered tree line → extend it distally + add its branches."""
-        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")             else None
+        shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
+                 else None)
         if shell is None or not hasattr(shell, "coronary_auto_extend"):
             return False
         return bool(shell.coronary_auto_extend(self, vid))
 
     def _cpr_autotrack_ok(self, which, mi, vi) -> bool:
-        """「ここから自動追跡」 on the distal edit point of a CPR line."""
+        """Auto-Track on the distal edit point of a CPR line."""
         if getattr(self, "_mode", "3D") != "3D" or not self._coro_work_on():
             return False
         if getattr(self, "_vol", None) is None:
@@ -2388,47 +2389,71 @@ class CPRMixin:
                 and vi == len(p3) - 1)
 
     def _cpr_autotrack(self, which, mi) -> dict | None:
-        """Extend the line from its distal edit point through the lumen (one
-        undo step; its short-axis follows). Branches met on the way are
-        registered as their own lines hung on this one (the line itself is
-        saved / registered for that, like 上書き保存)."""
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QApplication
+        """Auto-Track: extend the line from its distal edit point through the
+        lumen (one undo step; its short-axis follows). Branches met on the way
+        are registered as their own lines hung on this one (the line itself is
+        saved / registered for that, like 上書き保存). A progress window shows
+        the trace (中止 stops it); the result — also "nothing found" with its
+        reason, or an error — is always shown in a dialog."""
+        import traceback
         from multi_dicomviewer.core.cpr_autoextend import extend_vessel
+        from multi_dicomviewer.ui.autotrack_progress import (
+            AutoTrackProgress, show_result)
         m = self._measures[which][mi]
         p3 = np.asarray(m.get("pts3d") or [], float)
         if len(p3) < 2:
             return None
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
+                 else None)
         try:
-            res = extend_vessel(self._vol, self._dims, p3)
-        finally:
-            QApplication.restoreOverrideCursor()
-        trunk_mm = 0.0
-        if res.trunk is not None and len(res.trunk.ctrl) > 1:
-            add = np.asarray(res.trunk.ctrl, float)[1:]
-            trunk_mm = float(np.linalg.norm(
-                np.diff(res.trunk.path, axis=0), axis=1).sum())
-            before = self._meas_pane_snap(which)
-            m["pts3d"] = [list(map(float, q)) for q in p3] +                 [list(map(float, q)) for q in add]
-            m["pts"] = list(m["pts"]) + [
-                tuple(map(float, self._world3d_to_out(which, q))) for q in add]
-            m["_auto_traced"] = True
-            self._meas_record(which, before)
-            if self._cpr_is_src(which, mi):
-                self._cpr_edit_rebuild()
-            self._redraw_meas(which)
-        made = []
-        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")             else None
-        if res.branches and shell is not None                 and hasattr(shell, "coronary_add_auto_branches"):
-            hit = self._cpr_find_measure(m)
-            if hit is not None and self._cpr_ensure_built(hit)                     and self._cpr_register_to_tree(save_as=False, rearm=False):
-                made = shell.coronary_add_auto_branches(
-                    self, getattr(self, "_cpr_last_path", "") or "",
-                    res.branches) or []
-        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop}
+            with AutoTrackProgress(self.window()) as pg:
+                res = extend_vessel(self._vol, self._dims, p3,
+                                    cancel=pg.cancelled, progress=pg.update)
+            trunk_mm = 0.0
+            if res.trunk is not None and len(res.trunk.ctrl) > 1:
+                add = np.asarray(res.trunk.ctrl, float)[1:]
+                trunk_mm = float(np.linalg.norm(
+                    np.diff(res.trunk.path, axis=0), axis=1).sum())
+                before = self._meas_pane_snap(which)
+                m["pts3d"] = ([list(map(float, q)) for q in p3]
+                              + [list(map(float, q)) for q in add])
+                m["pts"] = list(m["pts"]) + [
+                    tuple(map(float, self._world3d_to_out(which, q)))
+                    for q in add]
+                m["_auto_traced"] = True
+                self._meas_record(which, before)
+                if self._cpr_is_src(which, mi):
+                    self._cpr_edit_rebuild()
+                self._redraw_meas(which)
+            made = []
+            lost = 0
+            if res.branches:
+                lost = len(res.branches)
+                if shell is not None and hasattr(shell,
+                                                 "coronary_add_auto_branches"):
+                    hit = self._cpr_find_measure(m)
+                    if (hit is not None and self._cpr_ensure_built(hit)
+                            and self._cpr_register_to_tree(save_as=False,
+                                                           rearm=False)):
+                        made = shell.coronary_add_auto_branches(
+                            self, getattr(self, "_cpr_last_path", "") or "",
+                            res.branches) or []
+                lost -= len(made)
+        except Exception as exc:                         # noqa: BLE001
+            traceback.print_exc()
+            show_result(self.window(), t("Auto-Track でエラーが発生しました: {e}",
+                                         e=f"{type(exc).__name__}: {exc}"),
+                        ok=False)
+            return None
+        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
+               "found": len(res.branches), "lost": lost}
         if shell is not None and hasattr(shell, "coronary_auto_extend_report"):
             shell.coronary_auto_extend_report(self, out)
+        else:
+            from multi_dicomviewer.ui.coronary_tree_window import (
+                CoronaryTreeWindow)
+            show_result(self.window(),
+                        CoronaryTreeWindow.auto_extend_text(t("CPR線"), out))
         return out
 
     # ---- Polygon = lasso while setting CPR lines (user 2026-11-18) ----------

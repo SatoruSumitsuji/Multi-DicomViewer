@@ -10575,7 +10575,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
             resume_act = menu.addAction(t("Resume trace"))
         # 自動追跡 from the distal edit point of a CPR line (user 2026-11-18)
-        auto_act = (menu.addAction(t("ここから自動追跡（遠位へ・分枝も）"))
+        auto_act = (menu.addAction(t("Auto-Track"))
                     if self._cpr_autotrack_ok(which, mi, vi) else None)
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
@@ -13692,7 +13692,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lvv_manual_endo_btn.setHelpToolTip(
             t("Edit the Endo border by hand. Seeded from Auto-Endo the first "
               "time; kept when the HU range changes."))
-        self._lvv_manual_endo_btn.clicked.connect(self._lvv_manual_endo)
+        self._lvv_manual_endo_btn.clicked.connect(self._lvv_manual_endo_ask)
         # 壁厚 (wall thickness) heat maps — mutually exclusive.
         self._lvv_thick3d_btn = FitButton(t("壁厚3D"))
         self._lvv_thick3d_btn.setCheckable(True)
@@ -13814,6 +13814,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 on and (ready or blood_ok
                         or self._lv_endo_manual_dict is not None))
             self._lvv_manual_endo_btn.setVisible(on)
+            # (user 2026-11-18) rarely needed → pale text (the grey of the
+            # disabled row-2 buttons) while still clickable; asks first.
+            self._lvv_manual_endo_btn.setStyleSheet(
+                "QPushButton{color:#a8a8a8;}" + self._BTN_DIS)
         # LVD表示 (manual MV-leaflet-tip level): available once the Endo envelope
         # mask exists (needs the long axis + lumen from the mask).
         if getattr(self, "_lvv_lvd_btn", None) is not None:
@@ -15158,6 +15162,18 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_update_text()
         self._lvv_thick_refresh_display()
         self._lvv_thick_sync_buttons()
+
+    def _lvv_manual_endo_ask(self, *args) -> None:
+        """Endo-Border(Manual) button: confirm first (user 2026-11-18) —
+        only Yes enters the manual Endo edit."""
+        from PyQt6.QtWidgets import QMessageBox
+        r = QMessageBox.question(
+            self.window(), t("Endo-Border(Manual)"),
+            t("本当に Manual Endo-Border を使いますか？"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if r == QMessageBox.StandardButton.Yes:
+            self._lvv_manual_endo()
 
     def _lvv_manual_endo(self, *args) -> None:
         """Manual-Endo: enter the Endo edit pass. Continues the RETAINED hand-

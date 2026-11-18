@@ -186,12 +186,15 @@ def _section(V, P, d, thr, R=4.0, h=0.25):
 
 
 class _Tracer:
-    def __init__(self, V: _Vol, prm: ExtendParams, cancel=None):
+    def __init__(self, V: _Vol, prm: ExtendParams, cancel=None,
+                 progress=None):
         self.V = V
         self.p = prm
         self.done_pts = []             # traced points (for the revisit check)
         self.total = 0.0
         self.cancel = cancel
+        self.progress = progress       # fn(stage, line_mm, total_mm, k, n)
+        self.stage = ("trunk", 0, 0)
 
     def _near_traced(self, P, own_recent) -> bool:
         if not self.done_pts:
@@ -268,7 +271,12 @@ class _Tracer:
         lost = 0
         length = 0.0
         stop = "length"
+        steps = 0
         while True:
+            steps += 1
+            if self.progress is not None and steps % 6 == 0:
+                st, k_, n_ = self.stage
+                self.progress(st, length, self.total, k_, n_)
             if self.cancel is not None and self.cancel():
                 stop = "cancel"
                 break
@@ -423,7 +431,7 @@ def _lumen_stats(V, ctrl):
 
 
 def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
-                  cancel=None) -> ExtendResult:
+                  cancel=None, progress=None) -> ExtendResult:
     """Trace on from the LAST point of *ctrl* (world mm, ≥ 2 points,
     proximal → distal). The trunk's continuation (A案) and every branch met
     on the way (each its own unbranched Segment)."""
@@ -435,7 +443,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     lumen, bg, r, d = _lumen_stats(V, C)
     if lumen - bg < prm.min_contrast_hu:
         return ExtendResult(None, [], "contrast")
-    T = _Tracer(V, prm, cancel)
+    T = _Tracer(V, prm, cancel, progress)
     # the given line counts as traced (nothing runs back into it)
     dense = []
     for a, b in zip(C[:-1], C[1:]):
@@ -449,8 +457,13 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     branches = []
     # breadth-first over the side branches: (seed, parent index, depth)
     queue = [(s, -1, 1) for s in seeds]
+    done_n = 0
     while queue:
         (P, w, rr, _i, Q), parent, depth = queue.pop(0)
+        done_n += 1
+        T.stage = ("branch", done_n, done_n + len(queue))
+        if progress is not None:
+            progress("branch", 0.0, T.total, done_n, done_n + len(queue))
         if depth > prm.max_depth or T.total >= prm.max_total_mm:
             continue
         if cancel is not None and cancel():
