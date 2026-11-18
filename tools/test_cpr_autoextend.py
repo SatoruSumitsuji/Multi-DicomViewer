@@ -36,7 +36,18 @@ shown = []
 QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(("warn", a)))
 QMessageBox.information = staticmethod(lambda *a, **k: shown.append(("info", a)))
 from multi_dicomviewer.core.centerline import CenterLine  # noqa: E402
-from multi_dicomviewer.core.cpr_autoextend import extend_vessel  # noqa: E402
+import multi_dicomviewer.core.cpr_autoextend as CAE  # noqa: E402
+# The trunk now STOPS at a fork for the user to choose (ask_at_fork). The
+# automatic A案 choice (still used for the side branches) is tested with
+# ask_at_fork off — also through the viewer / dock (patched module func).
+_EV_ASK = CAE.extend_vessel
+
+
+def extend_vessel(*a, prm=None, **k):
+    return _EV_ASK(*a, prm=prm or CAE.ExtendParams(ask_at_fork=False), **k)
+
+
+CAE.extend_vessel = extend_vessel
 from multi_dicomviewer.ui.coronary_tree_window import CoronaryTreeWindow  # noqa: E402
 from multi_dicomviewer.viewers.cpr_mixin import CPRMixin  # noqa: E402
 
@@ -435,6 +446,19 @@ lst = [e for e in rf_.log if e.get("line") == 0 and "step" in e][-1]
 check("stop detail carries the stop section point (3 mm ahead)",
       dt_.get("q") is not None and abs(np.linalg.norm(
           np.asarray(dt_["q"]) - np.asarray(lst["P"])) - 3.0) < 0.05)
+# a vessel in fat running next to LUNG (-800 HU 2 mm away on one side): the
+# lung must not pull the background down (background = fixed 50 HU; was
+# a measured bg -758 / threshold -198 →
+# fat counted as lumen → one big "chamber" → stop at step 1)
+v = np.full((nz, ny, nx), -90.0, np.float32)
+v[x < 28.0] = -800.0                    # lung 2 mm beside the vessel (x = 30)
+tube(v, [30, 30, 5], [30, 30, 75], 1.5, hu=360.0)
+rl_ = extend_vessel(noise(v, 7), D3, ctrl)
+hd_ = next(e for e in rl_.log if "bg" in e)
+tl_ = rl_.trunk.path if rl_.trunk is not None else np.zeros((2, 3))
+check("next to lung: background stays tissue, the vessel is traced",
+      hd_["bg"] == 50.0 and tl_[-1][2] > 70 and rl_.stop != "widening",
+      (hd_["bg"], rl_.stop, tl_[-1].round(1)))
 # progress reported while tracing (trunk mm, then branch k / n)
 stages = []
 extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(
@@ -472,6 +496,47 @@ for nm in ("ct_viewer.py", "ct_viewer_pygfx.py"):
 s = (ROOT / "multi_dicomviewer/ui/main_window.py").read_text(encoding="utf-8")
 check("shell: auto-extend entry points",
       "def coronary_auto_extend" in s and "def coronary_add_auto_branches" in s)
+
+# ---- the trunk stops at a fork; the user chooses the lumen ---------------
+CAE.extend_vessel = _EV_ASK
+rk = _EV_ASK(VY, D3, ctrl)
+check("fork: the trunk stops there with both lumens as candidates",
+      rk.stop == "fork" and len(rk.fork) == 2 and not rk.branches
+      and rk.fork[0]["ang"] <= rk.fork[1]["ang"]
+      and rk.fork[0]["r"] > rk.fork[1]["r"], (rk.stop, rk.fork))
+# following candidate k = a new trace from its centre
+ck = np.asarray(rk.fork[1]["c"], float)
+rk2 = _EV_ASK(VY, D3, np.vstack([rk.trunk.path[-2:], ck[None]]),
+              guided=True)
+check("fork: following the side candidate traces the side vessel "
+      "(no new fork with the other lumen right beside)",
+      rk2.trunk is not None and rk2.stop != "fork"
+      and np.linalg.norm(rk2.trunk.path[-1] - [50, 30, 60]) < 3.5,
+      rk2.trunk.path[-1].round(1) if rk2.trunk is not None else None)
+from multi_dicomviewer.ui import autotrack_progress as _ap  # noqa: E402
+_clicks = {"i": 1}
+_orig_exec = QMessageBox.exec
+
+
+def _fake_exec(self):
+    bs = [b_ for b_ in self.buttons()
+          if self.buttonRole(b_) == QMessageBox.ButtonRole.AcceptRole]
+    tgt = [b_ for b_ in bs if b_.text().startswith(("候補 2", "Follow candidate 2"))]
+    if tgt:
+        tgt[0].click()
+    return 0
+
+
+QMessageBox.exec = _fake_exec
+kk = _ap.show_result(None, "x", extra=["候補 1 へ進む", "候補 2 へ進む",
+                                       "中心を指定して続ける"])
+QMessageBox.exec = _orig_exec
+check("result dialog with several buttons returns the one chosen", kk == 1)
+txt_f = CoronaryTreeWindow.auto_extend_text("x", {
+    "trunk_mm": 21.0, "branches": [], "stop": "fork",
+    "fork_view": [dict(f, pos="右", dist=1.2) for f in rk.fork]})
+check("fork text lists each candidate (position / diameter / angle)",
+      txt_f.count("mm") >= 3 and ("2" in txt_f), txt_f)
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
 sys.stdout.flush()

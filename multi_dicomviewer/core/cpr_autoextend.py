@@ -73,6 +73,9 @@ class ExtendParams:
     branch_min_radius_mm: float = 0.75
     max_radius_mm: float = 3.5     # wider → a chamber / the aorta → stop
     radius_jump: float = 1.7       # sudden widening (× running radius) → stop
+    bg_hu: float = 50.0            # background HU (fixed; ≤ this = not lumen)
+    ask_at_fork: bool = True       # trunk: ≥ 2 lumens in the section → stop
+    #                                and let the user choose (no auto choice)
     half_frac: float = 0.5         # lumen threshold = bg + f·(lumen − bg)
     hu_frac: float = 0.6           # region mean HU ≥ bg + f·(lumen − bg)
     bridge_frac: float = 0.25      # bridged gap's weakest ≥ bg + f·contrast
@@ -101,6 +104,9 @@ class ExtendResult:
     branches: list = field(default_factory=list)   # [Segment]
     stop: str = ""                   # why the trunk ended
     log: list = field(default_factory=list)        # per-step diagnostics
+    # the trunk stopped at a fork (ask_at_fork): the candidate lumens there
+    # [{c, r, ang, hu}] (world mm) — the user picks which one to follow
+    fork: list = field(default_factory=list)
 
 
 class _Vol:
@@ -267,6 +273,8 @@ class _Tracer:
         self.log = log if log is not None else []
         self.last_rej = []
         self.last_n_regions = 0
+        self.fork = []
+        self.guided = False            # trunk starts on a user-chosen lumen
         # fn(line_id, depth, path (N,3), course) after every accepted point;
         # returning False stops here (the trace so far is kept)
         self.on_step = on_step
@@ -514,7 +522,10 @@ class _Tracer:
             rec = {"line": line_id, "step": step, "P": _r3(P), "d": _r3(d),
                    "r": round(r, 2), "lumen": round(lumen, 1),
                    "thr": round(thr, 1)}
-            starting = depth > 0 and length < 4.0
+            # a branch start, or the lumen the user just chose: follow it
+            # (nearest the course) for the first mm — the other lumen of
+            # the fork is right beside and is not a new choice
+            starting = (depth > 0 or self.guided) and length < 4.0
             cands, chamber, n_tr = [], False, 0
             # always the section step_mm (3 mm) ahead
             cands, chamber, n_tr = self._cands(P, d, prm.step_mm, thr, lumen,
@@ -522,7 +533,8 @@ class _Tracer:
             rec["regions"] = self.last_n_regions
             if self.last_rej:
                 rec["rejected"] = list(self.last_rej)
-            if depth == 0 and length < 1e-6 and not chamber:
+            if depth == 0 and length < 1e-6 and not chamber \
+                    and not self.guided:
                 # the trunk's start: lumen leaving sideways (carina)
                 for c in self._ray_cands(P, d, thr, lumen, 0.0,
                                          prm.start_ray_deg, own):
@@ -562,6 +574,19 @@ class _Tracer:
                 others, amb = [], False
             else:
                 main, others, amb = self._choose(cands)
+                big_enough = [c for c in cands
+                              if c["r"] >= prm.branch_min_radius_mm]
+                if depth == 0 and prm.ask_at_fork and len(big_enough) >= 2:
+                    # a fork: stop here, the user chooses the lumen to follow
+                    self.fork = [{"c": _r3(c["c"]), "r": round(c["r"], 2),
+                                  "ang": round(c["ang"], 1),
+                                  "hu": round(c["hu"], 1)}
+                                 for c in sorted(big_enough,
+                                                 key=lambda c: c["ang"])]
+                    stop = "fork"
+                    rec["event"] = "fork: user chooses"
+                    self.log.append(rec)
+                    break
             if amb:
                 for c in others:
                     if c["r"] >= prm.branch_min_radius_mm:
@@ -602,7 +627,8 @@ class _Tracer:
                 self.log.append(rec)
                 break
             dn = _unit(C - P)
-            lim = (prm.start_ray_deg if (depth == 0 and length < 1e-6)
+            lim = (prm.start_ray_deg if (depth == 0 and length < 1e-6
+                                         and not self.guided)
                    else prm.hairpin_deg + 5.0 if main["how"] == "ray"
                    else prm.uturn_deg)
             if _angle(dn, d) > lim:
@@ -698,7 +724,7 @@ def _arc_point(C, back_mm):
     return np.array([np.interp(t, s, C[:, i]) for i in range(3)])
 
 
-def _lumen_stats(V, C, dir_mm=3.0):
+def _lumen_stats(V, C, dir_mm=3.0, bg_hu=50.0):
     """Reference lumen HU, background HU, radius and course from the given
     line's distal part (its own vessel, so the tracker starts calibrated)."""
     seg = np.linalg.norm(np.diff(C, axis=0), axis=1)
@@ -720,11 +746,10 @@ def _lumen_stats(V, C, dir_mm=3.0):
     offs = np.asarray(offs)
     near = V.sample((pts[:, None, :] + offs[None, :, :]).reshape(-1, 3))
     lumen = float(np.median(near.reshape(len(pts), len(offs)).max(axis=1)))
-    ring = []
-    for P in pts:
-        for a in np.linspace(0, 2 * np.pi, 16, endpoint=False):
-            ring.append(P + 4.5 * (np.cos(a) * u + np.sin(a) * v))
-    bg = float(np.percentile(V.sample(np.asarray(ring)), 30))
+    # background = a FIXED tissue value (user 2026-11-18: ≤ 50 HU is
+    # background; no measured / variable background — a measured one took
+    # lung on its ring, -758 HU → threshold -198 HU → fat counted as lumen)
+    bg = float(bg_hu)
     thr = bg + 0.5 * (lumen - bg)
     rs = []
     for P in pts[-4:]:
@@ -738,7 +763,8 @@ def _lumen_stats(V, C, dir_mm=3.0):
 
 
 def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
-                  cancel=None, progress=None, on_step=None) -> ExtendResult:
+                  cancel=None, progress=None, on_step=None,
+                  guided: bool = False) -> ExtendResult:
     """Trace on from the LAST point of *ctrl* (world mm, ≥ 2 points,
     proximal → distal). The trunk's continuation (A案) and every branch met
     on the way (each its own unbranched Segment)."""
@@ -748,13 +774,16 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     log = []
     if len(C) < 2:
         return ExtendResult(None, [], "short", log)
-    lumen, bg, r, d, thr = _lumen_stats(V, C, prm.dir_mm)
+    lumen, bg, r, d, thr = _lumen_stats(V, C, prm.dir_mm, prm.bg_hu)
     log.append({"start": _r3(C[-1]), "course": _r3(d), "lumen": round(lumen, 1),
                 "bg": round(bg, 1), "r0": round(r, 2),
                 "params": asdict(prm)})
     if lumen - bg < prm.min_contrast_hu:
         return ExtendResult(None, [], "contrast", log)
     T = _Tracer(V, prm, lumen, bg, cancel, progress, log, on_step)
+    # guided = the last point was just set by the user (a fork choice /
+    # 「ここを中心に Auto-Track」): its first mm follow that lumen only
+    T.guided = bool(guided)
     # the given line counts as traced (nothing runs back into it), except
     # its last 3 mm the trace starts from
     keep = C[np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(C, axis=0),
@@ -814,7 +843,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     log.append({"result": {"trunk_mm": round(float(np.linalg.norm(
         np.diff(path, axis=0), axis=1).sum()) if trunk is not None else 0.0,
         1), "stop": stop, "branches": len(branches)}})
-    return ExtendResult(trunk, branches, stop, log)
+    return ExtendResult(trunk, branches, stop, log, list(T.fork))
 
 
 def save_log(log, folder=None, keep: int = 30) -> str:

@@ -20473,6 +20473,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
+        # On the DISTAL edit point (CoronaryTree work): move it to the
+        # clicked lumen centre and Auto-Track on from there.
+        a_at = None
+        if self._cpr_autotrack_center_ok():
+            a_at = menu.addAction(t("ここを中心に Auto-Track"))
+            menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an
         # edit point (jump there with the edit-point buttons) — between points
@@ -20485,7 +20491,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)
         act = menu.exec(QCursor.pos())
-        if act is a_add:
+        if a_at is not None and act is a_at:
+            o, u, vv, _n = self._cpr_frame()
+            du, dv = self._cpr_screen_to_offset(sx, sy)
+            self._cpr_autotrack_from_section(o + du * u + dv * vv)
+        elif act is a_add:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._cpr_screen_to_offset(sx, sy)   # section camera, not MPR
             self._cpr_add_ctrl_at(o + du * u + dv * vv)

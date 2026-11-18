@@ -76,7 +76,25 @@ class AutoTrackProgress:
         QApplication.processEvents()
 
 
-def show_result(parent, text: str, ok: bool = True) -> None:
-    """The Auto-Track result, always in a dialog."""
-    (QMessageBox.information if ok else QMessageBox.warning)(
-        parent, t("Auto-Track"), text)
+def show_result(parent, text: str, ok: bool = True, extra=""):
+    """The Auto-Track result, always in a dialog. *extra* = one button text
+    (→ returns True when chosen) or a list of them (→ returns the index of
+    the one chosen, -1 for OK)."""
+    many = isinstance(extra, (list, tuple))
+    labels = list(extra) if many else ([extra] if extra else [])
+    if not labels:
+        (QMessageBox.information if ok else QMessageBox.warning)(
+            parent, t("Auto-Track"), text)
+        return -1 if many else False
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Information if ok
+                else QMessageBox.Icon.Warning)
+    box.setWindowTitle(t("Auto-Track"))
+    box.setText(text)
+    btns = [box.addButton(s, QMessageBox.ButtonRole.AcceptRole)
+            for s in labels]
+    box.addButton(QMessageBox.StandardButton.Ok)
+    box.exec()
+    hit = box.clickedButton()
+    k = next((i for i, b in enumerate(btns) if b is hit), -1)
+    return k if many else k == 0

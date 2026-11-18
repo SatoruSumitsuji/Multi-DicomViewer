@@ -4073,9 +4073,10 @@ class MainWindow(QMainWindow):
         if sb is not None:
             sb.showMessage(txt.replace("\n", " "), 15000)
         from multi_dicomviewer.ui.autotrack_progress import show_result
-        show_result(self, txt,
-                    ok=not out.get("lost") and bool(out["trunk_mm"]
-                                                    or out["branches"]))
+        out["chosen"] = show_result(
+            self, txt, ok=(not out.get("lost") and out["stop"] != "fork"
+                           and bool(out["trunk_mm"] or out["branches"])),
+            extra=list(out.get("extras") or []))
 
     def _ct_leave_to_standard(self, viewer, kinds) -> None:
         """Before *kinds* stop being loaded on *viewer*: leave a mode that

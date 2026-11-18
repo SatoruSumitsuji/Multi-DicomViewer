@@ -3342,7 +3342,8 @@ class CoronaryTreeWindow(SnapDock):
         "turn": "急に曲がった", "revisit": "追跡済みの線に当たった",
         "bifurcation": "分岐で太さ・向きが同程度（幹を決めない）",
         "edge": "画像の端", "length": "長さの上限", "contrast": "造影が弱い",
-        "cancel": "停止（ここまでを残しました）", "short": "線が短い"}
+        "cancel": "停止（ここまでを残しました）", "short": "線が短い",
+        "fork": "分岐（進む内腔を選んでください）"}
 
     @classmethod
     def stop_text(cls, code: str) -> str:
@@ -3463,6 +3464,13 @@ class CoronaryTreeWindow(SnapDock):
         det = cls.detail_text(out.get("detail") or {})
         if det:
             tail += "\n\n" + det
+        for k, f in enumerate(out.get("fork_view") or []):
+            tail += "\n" + t("候補 {k}: 左ペインの{pos}（中心から {d:.1f} mm）・"
+                              "径 {r:.1f} mm・進行方向から {a:.0f}°・{hu:.0f} HU",
+                              k=k + 1, pos=f.get("pos", ""),
+                              d=float(f.get("dist", 0.0)),
+                              r=2.0 * float(f["r"]), a=float(f["ang"]),
+                              hu=float(f["hu"]))
         if out.get("probe_shown"):
             tail += "\n" + t("左ペイン: 止まった断面（最後の点から 3 mm 先）を表示中"
                               "（OK で元に戻ります）")

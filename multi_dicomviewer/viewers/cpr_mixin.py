@@ -2388,7 +2388,7 @@ class CPRMixin:
                 and len(p3) == len(m.get("pts") or [])
                 and vi == len(p3) - 1)
 
-    def _cpr_autotrack(self, which, mi) -> dict | None:
+    def _cpr_autotrack(self, which, mi, guided=False) -> dict | None:
         """Auto-Track: extend the line from its distal edit point through the
         lumen (one undo step). Shown LIVE, one step at a time (user
         2026-11-18): each new edit point is appended, the right (long-axis)
@@ -2465,7 +2465,7 @@ class CPRMixin:
                 pg_ref["pg"] = pg
                 res = extend_vessel(self._vol, self._dims, p3,
                                     cancel=pg.cancelled, progress=pg.update,
-                                    on_step=on_step)
+                                    on_step=on_step, guided=guided)
             trunk_mm = 0.0
             if res.trunk is not None and len(res.trunk.ctrl) > 1:
                 add = np.asarray(res.trunk.ctrl, float)[1:]
@@ -2512,7 +2512,17 @@ class CPRMixin:
         # while the result is read: the LEFT pane shows the section where it
         # stopped (3 mm beyond the last point) — a temporary end point, not
         # saved / not in undo, removed when the dialog is closed
+        before_probe = self._meas_pane_snap(which)
         keep = self._cpr_autotrack_probe(which, mi, m, out, res.stop)
+        fork = list(getattr(res, "fork", []) or [])
+        extras = []
+        if fork and keep is not None:
+            out["fork"] = fork
+            out["fork_view"] = self._cpr_autotrack_fork_view(fork)
+            extras = [t("候補 {k} へ進む", k=k + 1) for k in range(len(fork))]
+        if keep is not None:
+            extras.append(t("中心を指定して続ける"))
+        out["extras"] = extras
         try:
             if shell is not None and hasattr(shell,
                                              "coronary_auto_extend_report"):
@@ -2520,13 +2530,102 @@ class CPRMixin:
             else:
                 from multi_dicomviewer.ui.coronary_tree_window import (
                     CoronaryTreeWindow)
-                show_result(self.window(),
-                            CoronaryTreeWindow.auto_extend_text(t("CPR線"),
-                                                                out))
-        finally:
-            if keep is not None:
+                out["chosen"] = show_result(
+                    self.window(),
+                    CoronaryTreeWindow.auto_extend_text(t("CPR線"), out),
+                    ok=res.stop != "fork", extra=extras)
+        except Exception:                                # noqa: BLE001
+            traceback.print_exc()
+        ch = out.get("chosen", -1)
+        ch = ch if isinstance(ch, int) and not isinstance(ch, bool) else -1
+        if keep is not None and 0 <= ch < len(fork):
+            # 候補 k へ進む: the probe point becomes the edit point (undo),
+            # moved onto that lumen's centre, and Auto-Track goes on
+            self._meas_record(which, before_probe)
+            out["next"] = self._cpr_autotrack_from_section(fork[ch]["c"])
+            return out
+        out["chosen_extra"] = keep is not None and ch == len(extras) - 1 \
+            and ch >= 0
+        if keep is not None:
+            if out.get("chosen_extra"):
+                # 中心を指定して続ける: the stop-section point stays as the line's
+                # new distal edit point (its own undo step); a right-click on
+                # the true lumen centre in the left pane moves it there and
+                # Auto-Track goes on
+                self._meas_record(which, before_probe)
+                self._cpr_autotrack_hint(t(
+                    "左ペインで内腔の中心を右クリック →「ここを中心に Auto-Track」"))
+            else:
                 self._cpr_autotrack_probe_end(which, mi, m, keep)
         return out
+
+    def _cpr_autotrack_fork_view(self, fork) -> list:
+        """Where each fork candidate sits in the LEFT pane (the stop section
+        is shown there): a direction word + distance from the centre."""
+        out = []
+        try:
+            o, u, vv, _n = self._cpr_frame()
+        except Exception:                                # noqa: BLE001
+            o = None
+        for f in fork:
+            pos, dist = "", 0.0
+            if o is not None:
+                d3 = np.asarray(f["c"], float) - np.asarray(o, float)
+                du, dv = float(d3 @ np.asarray(u)), float(d3 @ np.asarray(vv))
+                dist = float(np.hypot(du, dv))
+                if dist < 0.7:
+                    pos = t("中央")
+                else:
+                    a = np.degrees(np.arctan2(dv, du)) % 360.0
+                    names = [t("右"), t("右上"), t("上"), t("左上"), t("左"),
+                             t("左下"), t("下"), t("右下")]
+                    pos = names[int(((a + 22.5) % 360.0) // 45.0)]
+            out.append({**f, "pos": pos, "dist": dist})
+        return out
+
+    def _cpr_autotrack_hint(self, text) -> None:
+        try:
+            sb = self.window().statusBar()
+            sb.showMessage(text, 60000)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _cpr_autotrack_center_ok(self) -> bool:
+        """The short-axis sits on the line's DISTAL edit point and Auto-Track
+        is available → 「ここを中心に Auto-Track」 in the left pane menu."""
+        c = self._cpr
+        if c is None or getattr(self, "_vol", None) is None:
+            return False
+        if not self._coro_work_on():
+            return False
+        m = self._cpr_src_measure()
+        if m is None or len(m.get("pts3d") or []) < 2:
+            return False
+        k = self._cpr_at_ctrl()
+        return k is not None and k == len(m["pts3d"]) - 1
+
+    def _cpr_autotrack_from_section(self, P) -> dict | None:
+        """「ここを中心に Auto-Track」: move the distal edit point to *P* (the
+        clicked spot on its short-axis section — one undo step) and run
+        Auto-Track on from there."""
+        c = self._cpr
+        m = self._cpr_src_measure()
+        if c is None or m is None:
+            return None
+        src, mi = c.get("src"), c.get("src_mi")
+        before = self._meas_pane_snap(src)
+        p3 = [list(map(float, q)) for q in m["pts3d"]]
+        p3[-1] = list(map(float, np.asarray(P, float)))
+        self._cpr_set_ctrl(m, src, p3)
+        self._meas_record(src, before)
+        self._cpr_rebuild()
+        idxs = self._cpr_ctrl_indices()
+        if idxs:
+            self._cpr["idx"] = int(idxs[-1])
+        self._cpr_sync_bar()
+        self._redraw_meas(src)
+        self._refresh()
+        return self._cpr_autotrack(src, mi, guided=True)
 
     def _cpr_autotrack_probe(self, which, mi, m, out, stop):
         """Show the stop section in the left pane: the line gets a TEMPORARY
