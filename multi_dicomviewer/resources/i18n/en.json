@@ -488,6 +488,8 @@
   "保存用データの作成に失敗しました: {e}": "Failed to create the data to save: {e}",
   "保存：{p}": "Saved: {p}",
   "値 (mm)": "Value (mm)",
+  "停止": "Stop",
+  "停止（ここまでを残しました）": "stopped (the trace so far is kept)",
   "備考": "Note",
   "元3DCT未読込": "Source 3D CT not loaded",
   "元の3DCTが特定できません。CPRを読み込み直すかフォルダを選択してください。": "Cannot identify the source 3D CT. Reload the CPR or select its folder.",

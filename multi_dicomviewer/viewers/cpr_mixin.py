@@ -2390,12 +2390,17 @@ class CPRMixin:
 
     def _cpr_autotrack(self, which, mi) -> dict | None:
         """Auto-Track: extend the line from its distal edit point through the
-        lumen (one undo step; its short-axis follows). Branches met on the way
-        are registered as their own lines hung on this one (the line itself is
-        saved / registered for that, like 上書き保存). A progress window shows
-        the trace (中止 stops it); the result — also "nothing found" with its
-        reason, or an error — is always shown in a dialog."""
+        lumen (one undo step). Shown LIVE, one step at a time (user
+        2026-11-18): each new edit point is appended, the right (long-axis)
+        pane turns to contain the course and centres on it, the left pane
+        shows its short-axis — 停止 stops at once and keeps what was traced
+        so far. Branches met on the way are registered as their own lines
+        hung on this one (the line itself is saved / registered for that,
+        like 上書き保存). The result — also "nothing found" with its reason,
+        or an error — is always shown in a dialog."""
+        import time
         import traceback
+        from PyQt6.QtWidgets import QApplication
         from multi_dicomviewer.core.cpr_autoextend import (extend_vessel,
                                                            save_log)
         from multi_dicomviewer.ui.autotrack_progress import (
@@ -2406,26 +2411,79 @@ class CPRMixin:
             return None
         shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
                  else None)
+        # open this line's short-axis (left pane) so each step can be shown
+        live = False
+        try:
+            hit = self._cpr_find_measure(m)
+            live = bool(hit is not None and self._cpr_ensure_built(hit)
+                        and self._cpr is not None
+                        and self._cpr_find_measure(m) is not None
+                        and self._cpr_is_src(*self._cpr_find_measure(m)))
+            if live:
+                which, mi = self._cpr_find_measure(m)
+        except Exception:                                # noqa: BLE001
+            traceback.print_exc()
+            live = False
+        before = self._meas_pane_snap(which)
+        base = [list(map(float, q)) for q in p3]
+
+        def _apply(extra):
+            pts = base + [list(map(float, q)) for q in extra]
+            self._cpr_set_ctrl(m, which, pts)
+
+        pg_ref = {}
+
+        def on_step(line_id, depth, path, course):
+            pg = pg_ref.get("pg")
+            if line_id != 0:                   # branches: progress only
+                return not (pg is not None and pg.cancelled())
+            try:
+                _apply(np.asarray(path, float)[1:])
+                if live and self._cpr is not None:
+                    self._cpr_rebuild()
+                    idxs = self._cpr_ctrl_indices()
+                    if idxs:
+                        self._cpr["idx"] = int(idxs[-1])
+                    self._cpr_sync_bar()
+                self._cpr_autotrack_view(which, path[-1], course)
+                self._redraw_meas(which)
+                self._refresh()
+            except Exception:                            # noqa: BLE001
+                traceback.print_exc()
+            # a short pause per step so it can be watched (and stopped)
+            t_end = time.monotonic() + self._AUTOTRACK_STEP_S
+            while time.monotonic() < t_end:
+                QApplication.processEvents()
+                if pg is not None and pg.cancelled():
+                    break
+                time.sleep(0.01)
+            return not (pg is not None and pg.cancelled())
+
         try:
             with AutoTrackProgress(self.window()) as pg:
+                pg_ref["pg"] = pg
                 res = extend_vessel(self._vol, self._dims, p3,
-                                    cancel=pg.cancelled, progress=pg.update)
+                                    cancel=pg.cancelled, progress=pg.update,
+                                    on_step=on_step)
             trunk_mm = 0.0
             if res.trunk is not None and len(res.trunk.ctrl) > 1:
                 add = np.asarray(res.trunk.ctrl, float)[1:]
                 trunk_mm = float(np.linalg.norm(
                     np.diff(res.trunk.path, axis=0), axis=1).sum())
-                before = self._meas_pane_snap(which)
-                m["pts3d"] = ([list(map(float, q)) for q in p3]
-                              + [list(map(float, q)) for q in add])
-                m["pts"] = list(m["pts"]) + [
-                    tuple(map(float, self._world3d_to_out(which, q)))
-                    for q in add]
+                _apply(add)
                 m["_auto_traced"] = True
-                self._meas_record(which, before)
-                if self._cpr_is_src(which, mi):
-                    self._cpr_edit_rebuild()
-                self._redraw_meas(which)
+            else:
+                _apply([])
+            self._meas_record(which, before)
+            if self._cpr_is_src(which, mi):
+                self._cpr_rebuild()
+                idxs = self._cpr_ctrl_indices()
+                if idxs:
+                    self._cpr["idx"] = int(idxs[-1])
+                self._cpr_sync_bar()
+                self._cpr_center_map_on_current()
+            self._redraw_meas(which)
+            self._refresh()
             made = []
             lost = 0
             if res.branches:
@@ -2457,6 +2515,41 @@ class CPRMixin:
             show_result(self.window(),
                         CoronaryTreeWindow.auto_extend_text(t("CPR線"), out))
         return out
+
+    _AUTOTRACK_STEP_S = 0.35          # pause per Auto-Track step (watchable)
+
+    def _cpr_autotrack_view(self, which, P, course) -> None:
+        """Auto-Track live view: the long-axis pane (the line's map pane,
+        normally the right pane B) turns to CONTAIN the current course (its
+        normal kept as close as possible to the current one, the vessel
+        running left → right as before) and centres on the new point *P*."""
+        key = which
+        c = getattr(self, "_cpr", None)
+        if c is not None and c.get("src") in ("A", "B"):
+            key = c.get("src")
+        if key != "B" or not hasattr(self, "_frame"):
+            return
+        d = np.asarray(course, float)
+        nd = float(np.linalg.norm(d))
+        if nd < 1e-9:
+            return
+        d = d / nd
+        u0, v0, n0 = (np.asarray(x, float) for x in self._frame["B"])
+        n1 = n0 - float(n0 @ d) * d
+        if float(np.linalg.norm(n1)) < 1e-3:
+            n1 = v0 - float(v0 @ d) * d
+        n1 = n1 / (float(np.linalg.norm(n1)) or 1.0)
+        u1 = d if float(d @ u0) >= 0.0 else -d
+        v1 = np.cross(n1, u1)
+        self._frame["B"] = self._ortho(u1, v1)
+        if hasattr(self, "_cross_ang"):
+            self._cross_ang["B"] = 0.0
+        P = np.asarray(P, float)
+        self._center = P.copy()
+        if hasattr(self, "_cpr_recenter_map_pane"):
+            self._cpr_recenter_map_pane("B", P)
+        else:
+            self._pc["B"] = P.copy()
 
     # ---- Polygon = lasso while setting CPR lines (user 2026-11-18) ----------
     @staticmethod

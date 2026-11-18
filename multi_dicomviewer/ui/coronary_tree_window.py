@@ -3342,7 +3342,7 @@ class CoronaryTreeWindow(SnapDock):
         "turn": "急に曲がった", "revisit": "追跡済みの線に当たった",
         "bifurcation": "分岐で太さ・向きが同程度（幹を決めない）",
         "edge": "画像の端", "length": "長さの上限", "contrast": "造影が弱い",
-        "cancel": "中止", "short": "線が短い"}
+        "cancel": "停止（ここまでを残しました）", "short": "線が短い"}
 
     @classmethod
     def stop_text(cls, code: str) -> str:

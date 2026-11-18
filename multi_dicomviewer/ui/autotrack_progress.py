@@ -1,6 +1,6 @@
 """Progress + result dialogs of the CPR Auto-Track (user 2026-11-18): the
 trace runs in the foreground, so a progress window shows what it is doing
-(trunk mm / branch k of n / total mm) with a 中止 button, and the result is
+(trunk mm / branch k of n / total mm) with a 停止 button, and the result is
 always shown in a dialog (also when nothing was found, with the reason)."""
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class AutoTrackProgress:
         self._cancel = False
 
     def __enter__(self):
-        d = QProgressDialog(t("Auto-Track: 準備中…"), t("中止"), 0, 0,
+        d = QProgressDialog(t("Auto-Track: 準備中…"), t("停止"), 0, 0,
                             self._parent)
         d.setWindowTitle(t("Auto-Track") + (f" — {self._name}"
                                             if self._name else ""))
@@ -32,6 +32,15 @@ class AutoTrackProgress:
         d.setAutoReset(False)
         d.canceled.connect(self._on_cancel)
         d.show()
+        # keep the panes visible (the trace is watched step by step): the
+        # window sits at the top-left of the main window, over the toolbar
+        try:
+            top = self._parent.window() if self._parent is not None else None
+            if top is not None:
+                g = top.frameGeometry()
+                d.move(g.left() + 24, g.top() + 60)
+        except Exception:                                # noqa: BLE001
+            pass
         QApplication.processEvents()
         self._dlg = d
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)

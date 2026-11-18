@@ -1670,6 +1670,8 @@
   "保存用データの作成に失敗しました: {e}": "Error al crear los datos para guardar: {e}",
   "保存：{p}": "Guardado: {p}",
   "値 (mm)": "Valor (mm)",
+  "停止": "Detener",
+  "停止（ここまでを残しました）": "detenido (se conserva lo trazado)",
   "備考": "Nota",
   "元3DCT未読込": "3DCT original sin cargar",
   "元の3DCTが特定できません。CPRを読み込み直すかフォルダを選択してください。": "No se puede identificar el 3DCT original. Vuelva a cargar el CPR o seleccione la carpeta.",

@@ -236,7 +236,7 @@ def _seg_min(V, P, C, n=None):
 
 class _Tracer:
     def __init__(self, V: _Vol, prm: ExtendParams, lumen, bg, cancel=None,
-                 progress=None, log=None):
+                 progress=None, log=None, on_step=None):
         self.V = V
         self.p = prm
         self.lumen0 = float(lumen)
@@ -247,6 +247,9 @@ class _Tracer:
         self.progress = progress       # fn(stage, line_mm, total_mm, k, n)
         self.stage = ("trunk", 0, 0)
         self.log = log if log is not None else []
+        # fn(line_id, depth, path (N,3), course) after every accepted point;
+        # returning False stops here (the trace so far is kept)
+        self.on_step = on_step
 
     # ---- helpers ---------------------------------------------------------
     def add_done(self, pts):
@@ -580,6 +583,10 @@ class _Tracer:
             d = self._course(hist)
             r = 0.7 * r + 0.3 * rn
             lumen = 0.85 * lumen + 0.15 * max(hu, thr)
+            if self.on_step is not None and self.on_step(
+                    line_id, depth, np.asarray(path), d) is False:
+                stop = "cancel"
+                break
         self.add_done(path)
         return np.asarray(path), stop, seeds
 
@@ -674,7 +681,7 @@ def _lumen_stats(V, C, dir_mm=3.0):
 
 
 def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
-                  cancel=None, progress=None) -> ExtendResult:
+                  cancel=None, progress=None, on_step=None) -> ExtendResult:
     """Trace on from the LAST point of *ctrl* (world mm, ≥ 2 points,
     proximal → distal). The trunk's continuation (A案) and every branch met
     on the way (each its own unbranched Segment)."""
@@ -690,7 +697,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
                 "params": asdict(prm)})
     if lumen - bg < prm.min_contrast_hu:
         return ExtendResult(None, [], "contrast", log)
-    T = _Tracer(V, prm, lumen, bg, cancel, progress, log)
+    T = _Tracer(V, prm, lumen, bg, cancel, progress, log, on_step)
     # the given line counts as traced (nothing runs back into it), except
     # its last 3 mm the trace starts from
     keep = C[np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(C, axis=0),
@@ -723,7 +730,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
             progress("branch", 0.0, T.total, done_n, done_n + len(queue))
         if depth > prm.max_depth or T.total >= prm.max_total_mm:
             continue
-        if cancel is not None and cancel():
+        if (cancel is not None and cancel()) or stop == "cancel":
             break
         Q = np.asarray(sd["Q"], float)
         Pf = np.asarray(sd["P"], float)

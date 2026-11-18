@@ -221,8 +221,15 @@ class Host(QWidget, CPRMixin):
     def _meas_record(self, pane, before):
         self.undo.append((pane, before))
 
+    _AUTOTRACK_STEP_S = 0.0
+
     def _redraw_meas(self, key):
         pass
+
+    def _refresh(self, *a, **k):
+        # live view: how many edit points the line had at each refresh
+        self.__dict__.setdefault("seen", []).append(
+            len(self._measures["B"][0]["pts3d"]))
 
     def _cpr_ensure_built(self, target=None):
         return True
@@ -320,6 +327,63 @@ check("diagnostic log: steps with position / radius / candidates, saved "
 txt = CoronaryTreeWindow.auto_extend_text(
     "x", {"trunk_mm": 5.0, "branches": [], "stop": "lumen", "log_path": lp})
 check("result text names the log file", lp in txt)
+# live view: the line grows one step at a time, the right pane turns to
+# contain the course and centres on the new point
+class LiveHost(Host):
+    def __init__(self):
+        super().__init__()
+        self._frame = {"A": (np.eye(3)[0], np.eye(3)[1], np.eye(3)[2]),
+                       "B": (np.eye(3)[0], np.eye(3)[2], -np.eye(3)[1])}
+        self._pc = {"A": np.zeros(3), "B": np.zeros(3)}
+        self._cross_ang = {"A": 0.0, "B": 0.0}
+        self._center = np.zeros(3)
+        self.views = []
+
+    def _ortho(self, u, v):
+        u = u / np.linalg.norm(u)
+        v = v - (v @ u) * u
+        v = v / np.linalg.norm(v)
+        return (u, v, np.cross(u, v))
+
+    def _cpr_autotrack_view(self, which, P, course):
+        super()._cpr_autotrack_view(which, P, course)
+        self.views.append((np.asarray(P, float).copy(),
+                           np.asarray(course, float).copy(),
+                           tuple(np.asarray(x).copy()
+                                 for x in self._frame["B"])))
+
+
+lh = LiveHost()
+lh._cpr_autotrack("B", 0)
+seen = lh.__dict__.get("seen", [])
+grow = [b - a for a, b in zip(seen, seen[1:])]
+check("live: the line grows step by step (one point per refresh)",
+      len(seen) >= 10 and max(grow) <= 1 and seen[-1] > 3, seen[:12])
+okv = all(abs(abs(float(fr[0] @ (dc / np.linalg.norm(dc)))) - 1) < 1e-6
+          and np.linalg.norm(lh._pc["B"] - lh.views[-1][0]) < 1e-9
+          for (P_, dc, fr) in lh.views[-1:])
+check("live: the right pane contains the course, centred on the new point",
+      lh.views and okv and all(abs(float(fr[2] @ np.array([0, -1.0, 0])))
+                               > 0.9 for (_, _, fr) in lh.views))
+# 停止 mid-way: the trace so far is kept, no branches traced after it
+import multi_dicomviewer.ui.autotrack_progress as _atp  # noqa: E402
+_orig_c = _atp.AutoTrackProgress.cancelled
+_n = {"k": 0}
+
+
+def _cancel_after(self):
+    _n["k"] += 1
+    return _n["k"] > 12
+
+
+_atp.AutoTrackProgress.cancelled = _cancel_after
+sh_ = Host()
+rs = sh_._cpr_autotrack("B", 0)
+_atp.AutoTrackProgress.cancelled = _orig_c
+n_pts = len(sh_._measures["B"][0]["pts3d"])
+check("停止: stops at once, keeps the trace so far (one undo step)",
+      rs is not None and rs["stop"] == "cancel" and 3 < n_pts < 20
+      and len(sh_.undo) == 1 and not rs["branches"], (rs, n_pts))
 # progress reported while tracing (trunk mm, then branch k / n)
 stages = []
 extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(
