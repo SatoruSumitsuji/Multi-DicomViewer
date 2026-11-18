@@ -200,11 +200,27 @@ def _col_delegate_cls():
     from PyQt6.QtWidgets import QStyledItemDelegate
 
     class _ColDelegate(QStyledItemDelegate):
-        """No cell is typed into (the Vessel name is changed with 名前を変更;
-        the FixName is the row-2 field)."""
+        """No cell is typed into, except the Vessel name of the row being
+        renamed (名前を変更 → edited in place, user 2026-11-19); the FixName is
+        the row-2 field. The typed name goes to *on_commit*, not the model."""
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.edit_vid = ""           # the row allowed to be edited
+            self.on_commit = None        # callback(vid, text)
 
         def createEditor(self, parent, option, index):
-            return None
+            from PyQt6.QtWidgets import QLineEdit
+            if (not self.edit_vid or index.column() != _C_NAME
+                    or index.siblingAtColumn(0).data(_UID_ROLE)
+                    != self.edit_vid):
+                return None
+            return QLineEdit(parent)
+
+        def setModelData(self, editor, model, index):
+            vid = index.siblingAtColumn(0).data(_UID_ROLE)
+            if self.on_commit is not None and vid:
+                self.on_commit(vid, editor.text())
     return _ColDelegate
 
 
@@ -646,6 +662,8 @@ class CoronaryTreeWindow(SnapDock):
             self._tree_w.setColumnWidth(c, w)
         self._col_w = dict(_COL_DEFAULT_W)       # width to restore on unfold
         self._col_delegate = _col_delegate_cls()(self._tree_w)
+        self._col_delegate.on_commit = self._rename_commit
+        self._col_delegate.closeEditor.connect(self._rename_closed)
         self._tree_w.setItemDelegate(self._col_delegate)
         try:
             folded = settings_mod.load_ui_state(_FOLD_KEY, []) or []
@@ -2893,21 +2911,75 @@ class CoronaryTreeWindow(SnapDock):
         self.treeChanged.emit()
 
     def _rename(self):
+        """名前を変更: type the new name right in the selected row's Vessel
+        cell (Enter = rename, Esc = cancel) — no separate window."""
         vid = self.selected_vid()
         if not vid:
             return
-        v = self._tree.vessels[vid]
-        cur = self._display_name(v)              # the name without the FixName
-        name, ok = QInputDialog.getText(self, t("名前を変更"), t("血管名:"),
-                                        text=cur)
-        if ok and name.strip():
-            # The Vessel-column name (the DetailName of old): the file becomes
-            # <name> + FixName on ファイル名更新.
-            v.name = v.detail_name = name.strip()
+        it = None
+        cur = self._tree_w.currentItem()
+        if cur is not None and cur.data(0, _UID_ROLE) == vid:
+            it = cur
+        else:
+            from PyQt6.QtWidgets import QTreeWidgetItemIterator
+            itr = QTreeWidgetItemIterator(self._tree_w)
+            while itr.value() is not None:
+                if itr.value().data(0, _UID_ROLE) == vid:
+                    it = itr.value()
+                    break
+                itr += 1
+        if it is None:
+            return
+        dlg = getattr(self, "_col_delegate", None)
+        if dlg is None:
+            return
+        dlg.edit_vid = vid
+        was = self._building
+        self._building = True                    # setFlags fires itemChanged
+        try:
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+        finally:
+            self._building = was
+        self._rename_item = it
+        self._tree_w.scrollToItem(it)
+        self._tree_w.setCurrentItem(it, _C_NAME)
+        self._tree_w.editItem(it, _C_NAME)
+
+    def _rename_closed(self, *_a):
+        """The in-place name editor closed (Enter / Esc / focus out)."""
+        dlg = getattr(self, "_col_delegate", None)
+        if dlg is not None:
+            dlg.edit_vid = ""
+        it = getattr(self, "_rename_item", None)
+        self._rename_item = None
+        if it is not None:
+            was = self._building
+            self._building = True
+            try:
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            except RuntimeError:                 # row rebuilt meanwhile
+                pass
+            finally:
+                self._building = was
+
+    def _rename_commit(self, vid, name):
+        """Apply the name typed in place (unchanged / empty = nothing)."""
+        v = self._tree.vessels.get(vid)
+        name = (name or "").strip()
+        if v is None or not name or name == self._display_name(v):
+            return
+        # The Vessel-column name (the DetailName of old): the file becomes
+        # <name> + FixName.
+        v.name = v.detail_name = name
+        # rebuild after the editor has closed (we are inside its commit)
+        from PyQt6.QtCore import QTimer
+
+        def _apply():
             self._populate()
             self.treeChanged.emit()
             # The file follows at once (<name> + FixName), no extra step.
             self._batch_rename(only={vid}, ask=False)
+        QTimer.singleShot(0, _apply)
 
     def _reparent(self):
         vid = self.selected_vid()

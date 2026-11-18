@@ -406,7 +406,11 @@ class TW:
     _rename_plan_raw = W._rename_plan_raw
     _batch_rename = W._batch_rename
     _rename = W._rename
+    _rename_commit = W._rename_commit
     _retarget_viewer_path = W._retarget_viewer_path
+
+    def _populate(self):
+        pass
 
     def _source_viewer(self):
         return None
@@ -525,8 +529,8 @@ try:
     w._refresh_rename_btn = lambda: None
     w._write_to = lambda *_a: None
     w.selected_vid = lambda: "a"
-    ctw.QInputDialog.getText = staticmethod(lambda *a, **k: ("LAD6", True))
-    w._rename()
+    w._rename_commit("a", "LAD6")              # typed in place + Enter
+    app.processEvents()
     files = sorted(os.listdir(tmp))
     check("rename → that line's file renamed at once (<name> + FixName)",
           "LAD6@030.cpr.json" in files and "01@030.cpr.json" not in files
@@ -541,13 +545,77 @@ try:
           and _json.load(open(newp, encoding="utf-8")).get("detail_name") == "LAD6")
     check("… the viewer's Overwrite / Next target follows the new file",
           fv._cpr_last_path == newp and fv._measures["B"][0]["_cpr_file"] == newp)
-    ctw.QInputDialog.getText = staticmethod(lambda *a, **k: ("LAD7", True))
-    w._rename()
+    w._rename_commit("a", "LAD7")
+    app.processEvents()
     check("a clash with another line's name: file kept, user told",
           os.path.exists(newp) and w.warned, str(w.warned))
 finally:
     ctw.QInputDialog.getText = real_in
     QMessageBox.question = real_q
+
+# 名前を変更 = the Vessel cell of the selected row is edited IN PLACE (no
+# separate window; user 2026-11-19) on the real dock
+from PyQt6.QtWidgets import QLineEdit  # noqa: E402
+from PyQt6.QtCore import Qt as _Qt  # noqa: E402
+from multi_dicomviewer.core.centerline import CenterLine as _CL  # noqa: E402
+ctw.QInputDialog.getText = staticmethod(
+    lambda *a, **k: (_ for _ in ()).throw(AssertionError("dialog opened")))
+dk = W(None)
+dk._use_uid("rename-uid")
+dk.resize(500, 400)
+dk.show()
+_b = dk._bundle()
+_b["tree"].add_root("x", "01", "LAD",
+                    _CL.from_points([[0, 0, 0], [0, 0, 20]], step_mm=0.5).points)
+dk._populate()
+app.processEvents()
+_it = dk._tree_w.topLevelItem(0)
+while _it is not None and _it.data(0, ctw._UID_ROLE) != "x":
+    _it = (_it.child(0) if _it.childCount() else None)
+dk._tree_w.setCurrentItem(_it)
+_seen = []
+dk._batch_rename = lambda *a, **k: _seen.append(k.get("only"))
+dk._rename()
+app.processEvents()
+ed_ = dk._tree_w.findChild(QLineEdit)
+check("rename: an editor opens in the row itself (no dialog)",
+      ed_ is not None and ed_.isVisible()
+      and ed_.text() == W._display_name(_b["tree"].vessels["x"]),
+      ed_.text() if ed_ else None)
+if ed_ is not None:
+    ed_.setText("LAD9")
+    from PyQt6.QtTest import QTest
+    QTest.keyClick(ed_, _Qt.Key.Key_Return)
+for _ in range(5):
+    app.processEvents()
+check("rename: Enter → the vessel renamed, its file follows",
+      W._display_name(_b["tree"].vessels["x"]) == "LAD9"
+      and _seen == [{"x"}], (_b["tree"].vessels["x"].name, _seen))
+_it2 = None
+for _i in range(dk._tree_w.topLevelItemCount()):
+    _t = dk._tree_w.topLevelItem(_i)
+    stack = [_t]
+    while stack:
+        _n = stack.pop()
+        if _n.data(0, ctw._UID_ROLE) == "x":
+            _it2 = _n
+        stack.extend(_n.child(j) for j in range(_n.childCount()))
+check("rename: afterwards the row is not editable (double-click = old use)",
+      _it2 is not None
+      and not (_it2.flags() & _Qt.ItemFlag.ItemIsEditable)
+      and dk._col_delegate.edit_vid == "")
+dk._rename()
+app.processEvents()
+ed_ = dk._tree_w.findChild(QLineEdit)
+if ed_ is not None and ed_.isVisible():
+    ed_.setText("ZZZ")
+    QTest.keyClick(ed_, _Qt.Key.Key_Escape)
+for _ in range(5):
+    app.processEvents()
+check("rename: Esc → name unchanged",
+      W._display_name(_b["tree"].vessels["x"]) == "LAD9")
+ctw.QInputDialog.getText = real_in
+dk.hide()
 _ = QPoint
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
