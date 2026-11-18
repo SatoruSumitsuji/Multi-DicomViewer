@@ -16034,6 +16034,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # one being edited right now, the handler leaves the short-axis first.
         if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
             resume_act = menu.addAction(t("Resume trace"))
+        # 自動追跡 from the distal edit point of a CPR line (user 2026-11-18)
+        auto_act = (menu.addAction(t("ここから自動追跡（遠位へ・分枝も）"))
+                    if self._cpr_autotrack_ok(which, mi, vi) else None)
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
@@ -16075,6 +16078,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         elif cpr_edit_act is not None and chosen is cpr_edit_act:
             self._enter_cpr(which, mi)           # re-enter the short-axis to edit
             return                               # _enter_cpr redraws itself
+        elif auto_act is not None and chosen is auto_act:
+            self._cpr_autotrack(which, mi)       # records its own undo step
+            return
         elif resume_act is not None and chosen is resume_act:
             # If this line IS the active CPR short-axis, leave it first so self._cpr
             # doesn't dangle on the measure _resume_trace is about to un-commit.

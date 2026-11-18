@@ -3939,6 +3939,86 @@ class MainWindow(QMainWindow):
         self.refresh_ct_mode_bars()
         return bool(kept)
 
+    # ---- 自動追跡 (user 2026-11-18) -------------------------------------------
+    def _viewer_next_dir(self, viewer) -> str:
+        f = getattr(viewer, "_cpr_next_dir", None)
+        try:
+            return (f() or "") if callable(f) else ""
+        except Exception:                                # noqa: BLE001
+            return ""
+
+    def coronary_auto_extend(self, viewer, vid: str):
+        """A registered tree line's 「ここから自動追跡」 on *viewer*'s CT."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "auto_extend"):
+            return None
+        path = ""
+        try:
+            path = w._by_uid.get(w._ct_of_vessel(vid), {}).get(
+                "paths", {}).get(vid, "") or ""
+        except Exception:                                # noqa: BLE001
+            path = ""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            out = w.auto_extend(vid, getattr(viewer, "_vol", None),
+                                getattr(viewer, "_dims", None),
+                                folder=self._viewer_next_dir(viewer))
+        finally:
+            QApplication.restoreOverrideCursor()
+        if out and path and hasattr(viewer, "_cpr_retire_stale_copies"):
+            try:
+                viewer._cpr_retire_stale_copies(path)
+            except Exception:                            # noqa: BLE001
+                pass
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        if out:
+            nm = ""
+            try:
+                nm = w._by_uid[w._ct_of_vessel(vid)]["tree"].vessels[vid].name
+            except Exception:                            # noqa: BLE001
+                nm = ""
+            self.coronary_auto_extend_report(viewer, out, name=nm, w=w)
+        return out
+
+    def coronary_add_auto_branches(self, viewer, path: str, segments) -> list:
+        """The CPR line saved to *path* got branches from 自動追跡 → add each
+        as its own tree line hung on it."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "add_auto_branches") or not path:
+            return []
+        key = os.path.normcase(os.path.abspath(path))
+        vid = None
+        for b in getattr(w, "_by_uid", {}).values():
+            for v_, pp in (b.get("paths") or {}).items():
+                if pp and os.path.normcase(os.path.abspath(pp)) == key \
+                        and v_ in b["tree"].vessels:
+                    vid = v_
+        if vid is None:
+            return []
+        made = w.add_auto_branches(vid, segments,
+                                   folder=self._viewer_next_dir(viewer))
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        return made
+
+    def coronary_auto_extend_report(self, viewer, out, name: str = "",
+                                    w=None) -> None:
+        """Result line of 自動追跡 (Coronary Tree hint + status bar)."""
+        w = w or getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "auto_extend_text"):
+            return
+        txt = w.auto_extend_text(name or t("CPR線"), out)
+        try:
+            w._hint.setText(txt)
+        except Exception:                                # noqa: BLE001
+            pass
+        sb = self.statusBar() if hasattr(self, "statusBar") else None
+        if sb is not None:
+            sb.showMessage(txt, 15000)
+
     def _ct_leave_to_standard(self, viewer, kinds) -> None:
         """Before *kinds* stop being loaded on *viewer*: leave a mode that
         shows them (Territory always; CoronaryTree for the tree; LV for the

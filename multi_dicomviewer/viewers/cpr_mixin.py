@@ -842,6 +842,12 @@ class CPRMixin:
             sep_act = menu.addAction(t("ここで separate（2本に分ける）"))
             sep_act.setEnabled(
                 vid != (getattr(self, "_coro_edit_vid", "") or ""))
+        auto_act = None
+        if (vid is not None and shell is not None
+                and hasattr(shell, "coronary_auto_extend")):
+            auto_act = menu.addAction(t("ここから自動追跡（遠位へ・分枝も）"))
+            auto_act.setEnabled(
+                vid != (getattr(self, "_coro_edit_vid", "") or ""))
         names = getattr(self, "_coro_names", set())
         show_act = hide_all = None
         if vid is not None:
@@ -885,6 +891,9 @@ class CPRMixin:
             return
         if sep_act is not None and chosen is sep_act:
             self._coro_split_at(which, sx, sy, vid)
+            return
+        if auto_act is not None and chosen is auto_act:
+            self._coro_auto_extend(vid)
             return
         if desel_act is not None and chosen is desel_act:
             try:
@@ -2356,6 +2365,71 @@ class CPRMixin:
         if svid is None or idx is None:
             return False
         return bool(shell.coronary_split_vessel(self, svid, int(idx)))
+
+    # ---- 自動追跡 (user 2026-11-18) -------------------------------------------
+    def _coro_auto_extend(self, vid) -> bool:
+        """A registered tree line → extend it distally + add its branches."""
+        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")             else None
+        if shell is None or not hasattr(shell, "coronary_auto_extend"):
+            return False
+        return bool(shell.coronary_auto_extend(self, vid))
+
+    def _cpr_autotrack_ok(self, which, mi, vi) -> bool:
+        """「ここから自動追跡」 on the distal edit point of a CPR line."""
+        if getattr(self, "_mode", "3D") != "3D" or not self._coro_work_on():
+            return False
+        if getattr(self, "_vol", None) is None:
+            return False
+        m = self._measures[which][mi]
+        p3 = m.get("pts3d")
+        return (m.get("type") == "polyline" and m.get("_lv") is None
+                and bool(p3) and len(p3) >= 2
+                and len(p3) == len(m.get("pts") or [])
+                and vi == len(p3) - 1)
+
+    def _cpr_autotrack(self, which, mi) -> dict | None:
+        """Extend the line from its distal edit point through the lumen (one
+        undo step; its short-axis follows). Branches met on the way are
+        registered as their own lines hung on this one (the line itself is
+        saved / registered for that, like 上書き保存)."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        from multi_dicomviewer.core.cpr_autoextend import extend_vessel
+        m = self._measures[which][mi]
+        p3 = np.asarray(m.get("pts3d") or [], float)
+        if len(p3) < 2:
+            return None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            res = extend_vessel(self._vol, self._dims, p3)
+        finally:
+            QApplication.restoreOverrideCursor()
+        trunk_mm = 0.0
+        if res.trunk is not None and len(res.trunk.ctrl) > 1:
+            add = np.asarray(res.trunk.ctrl, float)[1:]
+            trunk_mm = float(np.linalg.norm(
+                np.diff(res.trunk.path, axis=0), axis=1).sum())
+            before = self._meas_pane_snap(which)
+            m["pts3d"] = [list(map(float, q)) for q in p3] +                 [list(map(float, q)) for q in add]
+            m["pts"] = list(m["pts"]) + [
+                tuple(map(float, self._world3d_to_out(which, q))) for q in add]
+            m["_auto_traced"] = True
+            self._meas_record(which, before)
+            if self._cpr_is_src(which, mi):
+                self._cpr_edit_rebuild()
+            self._redraw_meas(which)
+        made = []
+        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")             else None
+        if res.branches and shell is not None                 and hasattr(shell, "coronary_add_auto_branches"):
+            hit = self._cpr_find_measure(m)
+            if hit is not None and self._cpr_ensure_built(hit)                     and self._cpr_register_to_tree(save_as=False, rearm=False):
+                made = shell.coronary_add_auto_branches(
+                    self, getattr(self, "_cpr_last_path", "") or "",
+                    res.branches) or []
+        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop}
+        if shell is not None and hasattr(shell, "coronary_auto_extend_report"):
+            shell.coronary_auto_extend_report(self, out)
+        return out
 
     # ---- Polygon = lasso while setting CPR lines (user 2026-11-18) ----------
     @staticmethod

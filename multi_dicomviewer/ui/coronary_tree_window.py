@@ -3326,6 +3326,129 @@ class CoronaryTreeWindow(SnapDock):
                              a=vk.name, b=vd.name))
         return k
 
+    # ---- 自動追跡 (user 2026-11-18) -----------------------------------------
+    _STOP_TEXT = {
+        "lumen": "内腔が途切れた", "thin": "細くなった",
+        "widening": "急に太くなった（心腔・大動脈など）",
+        "turn": "急に曲がった", "revisit": "追跡済みの線に当たった",
+        "bifurcation": "分岐で太さ・向きが同程度（幹を決めない）",
+        "edge": "画像の端", "length": "長さの上限", "contrast": "造影が弱い",
+        "cancel": "中止", "short": "線が短い"}
+
+    @classmethod
+    def stop_text(cls, code: str) -> str:
+        return t(cls._STOP_TEXT.get(code, code or "—"))
+
+    def _vessel_folder(self, b, vid, folder="") -> str:
+        path = b["paths"].get(vid, "") or ""
+        d0 = os.path.dirname(path) if path else ""
+        if d0 and os.path.isdir(d0):
+            return d0
+        if folder and os.path.isdir(folder):
+            return folder
+        return QFileDialog.getExistingDirectory(
+            self, t("自動追跡した線の保存先フォルダ（連番 NN.cpr.json）"),
+            b.get("ct_dir", "") or "") or ""
+
+    def add_auto_branches(self, vid: str, segments, folder: str = "") -> list:
+        """Side branches found by 自動追跡 from vessel *vid*: each becomes its
+        own line (next serial NN, its NN.cpr.json next to *vid*'s file),
+        hung on its parent (``seg.parent`` = -1 → *vid*, else that earlier
+        segment) at the nearest sample. Returns the new vessel ids."""
+        uid = self._ct_of_vessel(vid)
+        if not uid or not segments:
+            return []
+        self._use_uid(uid)
+        b = self._bundle()
+        tree = b["tree"]
+        if vid not in tree.vessels:
+            return []
+        d0 = self._vessel_folder(b, vid, folder)
+        if not d0:
+            return []
+        made = []
+        for seg in segments:
+            pv = vid if seg.parent < 0 or seg.parent >= len(made) \
+                else made[seg.parent]
+            if not pv or pv not in tree.vessels:
+                made.append("")
+                continue
+            ctrl = np.asarray(seg.ctrl, float)
+            name = self._serial_name(d0)
+            nv_id = self._unique_vid()
+            pts = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM).points
+            nv = tree.add_vessel(nv_id, name, "branch", pts, ctrl=ctrl)
+            nv.auto_traced = True
+            par = tree.vessels[pv]
+            nv.parent = pv
+            nv.junction = int(np.argmin(
+                np.linalg.norm(par.points - pts[0], axis=1)))
+            if vid in b["hidden"]:
+                b["hidden"].add(nv_id)
+            p = os.path.join(d0, name + ".cpr.json")
+            rec = self._cpr_file_with(None, ctrl, b.get("series"),
+                                      b.get("ct_dir", ""))
+            rec["auto_traced"] = True
+            if self._write_cpr(p, rec):
+                b["paths"][nv_id] = p
+            made.append(nv_id)
+        made = [m for m in made if m]
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        return made
+
+    def auto_extend(self, vid: str, vol, dims, folder: str = "",
+                    cancel=None) -> dict | None:
+        """「ここから自動追跡」 on a registered line: extend vessel *vid*
+        distally through the lumen (its file rewritten) and add every branch
+        met on the way as its own line. {"trunk_mm", "branches", "stop"}."""
+        from multi_dicomviewer.core.cpr_autoextend import extend_vessel
+        uid = self._ct_of_vessel(vid)
+        if not uid or vol is None or dims is None:
+            return None
+        self._use_uid(uid)
+        b = self._bundle()
+        tree = b["tree"]
+        v = tree.vessels.get(vid)
+        if v is None:
+            return None
+        ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
+                          else v.points, float)
+        res = extend_vessel(vol, dims, ctrl, cancel=cancel)
+        trunk_mm = 0.0
+        if res.trunk is not None:
+            add = np.asarray(res.trunk.ctrl, float)[1:]
+            if len(add):
+                trunk_mm = float(np.linalg.norm(
+                    np.diff(res.trunk.path, axis=0), axis=1).sum())
+                merged = np.vstack([ctrl, add])
+                self._set_vessel_ctrl(tree, vid, merged)
+                v.ctrl_manual = None
+                v.fin_traced = False
+                path = b["paths"].get(vid, "") or ""
+                old = self._read_cpr(path) if path else None
+                if path and old is not None:
+                    self._write_cpr(path, self._cpr_file_with(old, merged))
+        made = self.add_auto_branches(vid, res.branches, folder) \
+            if res.branches else []
+        if not made:
+            self._populate()
+            self.treeChanged.emit()
+            self._push_overlay()
+        out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop}
+        self._hint.setText(self.auto_extend_text(v.name, out))
+        return out
+
+    @classmethod
+    def auto_extend_text(cls, name, out) -> str:
+        if not out["trunk_mm"] and not out["branches"]:
+            return t("「{n}」: 追跡できる内腔が見つかりませんでした（{s}）。",
+                     n=name, s=cls.stop_text(out["stop"]))
+        return t("「{n}」を {mm:.0f} mm 延長、分枝 {k} 本を追加しました"
+                 "（幹の停止: {s}）。", n=name, mm=out["trunk_mm"],
+                 k=len(out["branches"]), s=cls.stop_text(out["stop"]))
+
     def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
         """Replace a vessel's centreline (ctrl + resampled points) and re-snap the
         junction of each direct child onto the new line."""
