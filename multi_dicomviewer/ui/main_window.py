@@ -3891,6 +3891,54 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    # ---- CPR line separate / connect (user 2026-11-18) -----------------------
+    def coronary_split_vessel(self, viewer, vid: str, idx: int) -> bool:
+        """A tree line's 「ここで separate」 on *viewer*: cut it at sample *idx*
+        (the distal part gets the next serial name, next to the original)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "split_vessel"):
+            return False
+        folder = ""
+        f = getattr(viewer, "_cpr_next_dir", None)
+        if callable(f):
+            try:
+                folder = f() or ""
+            except Exception:                            # noqa: BLE001
+                folder = ""
+        new = w.split_vessel(vid, idx, folder=folder)
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        return bool(new)
+
+    def coronary_connect_vessels(self, viewer, a: str, ea: str,
+                                 b: str, eb: str) -> bool:
+        """「connect」 on *viewer*: join two tree lines at the selected ends
+        (the gap bridged along the lumen of *viewer*'s CT)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "connect_vessels"):
+            return False
+        paths = {}
+        try:
+            for x in (a, b):
+                paths[x] = (w._by_uid.get(w._ct_of_vessel(x), {})
+                            .get("paths", {}).get(x, "")) or ""
+        except Exception:                                # noqa: BLE001
+            paths = {}
+        kept = w.connect_vessels(a, ea, b, eb,
+                                 vol=getattr(viewer, "_vol", None),
+                                 dims=getattr(viewer, "_dims", None))
+        if kept and hasattr(viewer, "_cpr_retire_stale_copies"):
+            # this session's copies of the merged-away line's file are stale
+            gone = paths.get(b if kept == a else a, "")
+            if gone:
+                try:
+                    viewer._cpr_retire_stale_copies(gone)
+                except Exception:                        # noqa: BLE001
+                    pass
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        return bool(kept)
+
     def _ct_leave_to_standard(self, viewer, kinds) -> None:
         """Before *kinds* stop being loaded on *viewer*: leave a mode that
         shows them (Territory always; CoronaryTree for the tree; LV for the

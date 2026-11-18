@@ -3127,6 +3127,205 @@ class CoronaryTreeWindow(SnapDock):
         except OSError:
             return False
 
+    # ---- separate / connect a CPR line (user 2026-11-18) -------------------
+    @staticmethod
+    def _serial_name(folder: str) -> str:
+        """The next serial (NN) in *folder* — the same numbering as Next."""
+        from multi_dicomviewer.viewers.cpr_mixin import CPRMixin
+        return CPRMixin._cpr_next_serial(folder)
+
+    @staticmethod
+    def _cpr_file_with(base, ctrl, series=None, src_dir="") -> dict:
+        """A .cpr.json payload for *ctrl*: *base* (the original file) with
+        its line replaced, or a minimal MDV-CPR record."""
+        if isinstance(base, dict):
+            nd = dict(base)
+        else:
+            nd = {"format": "MDV-CPR", "version": 1, "type": "cpr",
+                  "series": dict(series or {}), "src_dir": src_dir or ""}
+        nd["ctrl"] = np.asarray(ctrl, float).round(4).tolist()
+        for k in ("ctrl_manual", "gap_pts", "fin_traced"):
+            nd.pop(k, None)
+        st0 = dict(nd.get("state") or {})
+        st0["idx"] = 0                           # the old index may not fit
+        nd["state"] = st0
+        return nd
+
+    def split_vessel(self, vid: str, idx: int, folder: str = "") -> str:
+        """「ここで separate」: cut vessel *vid* at its sample *idx* into two
+        lines. The proximal part keeps the vessel (name / role / parent /
+        file); the distal part becomes a new line named by the next serial
+        (NN, its NN.cpr.json next to the original file, else in *folder*),
+        attached to the proximal end, taking the side branches beyond the
+        cut. Returns the new vessel id, or "" (with a message)."""
+        uid = self._ct_of_vessel(vid)
+        if not uid:
+            return ""
+        self._use_uid(uid)
+        b = self._bundle()
+        tree = b["tree"]
+        v = tree.vessels.get(vid)
+        if v is None or v.n < 4:
+            return ""
+        idx = int(idx)
+        if not (1 <= idx <= v.n - 2):
+            self._warn(t("線の端では分離できません。もう少し内側を右クリック"
+                         "してください。"))
+            return ""
+        P = np.asarray(v.points[idx], float)
+        ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
+                          else v.points, float)
+        # each edit point's place along the line (its nearest sample)
+        pos = [int(np.argmin(np.linalg.norm(v.points - c, axis=1)))
+               for c in ctrl]
+        near = 0.5                                # mm: an edit point AT the cut
+        prox = [c for c, s in zip(ctrl, pos) if s < idx
+                and np.linalg.norm(c - P) > near] + [P]
+        dist = [P] + [c for c, s in zip(ctrl, pos) if s > idx
+                      and np.linalg.norm(c - P) > near]
+        if len(prox) < 2 or len(dist) < 2:
+            self._warn(t("分離後の線が短すぎます。もう少し内側を右クリック"
+                         "してください。"))
+            return ""
+        path = b["paths"].get(vid, "") or ""
+        d0 = os.path.dirname(path) if path else ""
+        if not (d0 and os.path.isdir(d0)):
+            d0 = folder if folder and os.path.isdir(folder) else ""
+        if not d0:
+            d0 = QFileDialog.getExistingDirectory(
+                self, t("分離した線の保存先フォルダ（連番 NN.cpr.json）"),
+                b.get("ct_dir", "") or "")
+            if not d0:
+                return ""
+        name = self._serial_name(d0)
+        new_path = os.path.join(d0, name + ".cpr.json")
+        movers = [c for c, cv in tree.vessels.items()
+                  if cv.parent == vid and cv.junction is not None
+                  and int(cv.junction) > idx]
+        self._set_vessel_ctrl(tree, vid, np.asarray(prox, float))
+        v.ctrl_manual = None
+        v.fin_traced = False
+        new_vid = self._unique_vid()
+        dpts = CenterLine.from_points(np.asarray(dist, float),
+                                      step_mm=_CPR_STEP_MM).points
+        nv = tree.add_vessel(new_vid, name, "branch", dpts,
+                             ctrl=np.asarray(dist, float))
+        nv.auto_traced = bool(v.auto_traced)
+        nv.parent = vid
+        nv.junction = int(v.n - 1)               # at the proximal part's end
+        for c in movers:
+            cv = tree.vessels[c]
+            cv.parent = new_vid
+            cv.junction = int(np.argmin(
+                np.linalg.norm(nv.points - cv.points[0], axis=1)))
+        if vid in b["hidden"]:
+            b["hidden"].add(new_vid)
+        old = self._read_cpr(path) if path else None
+        if path and old is not None:
+            self._write_cpr(path, self._cpr_file_with(old, prox))
+        if self._write_cpr(new_path, self._cpr_file_with(
+                old, dist, b.get("series"), b.get("ct_dir", ""))):
+            b["paths"][new_vid] = new_path
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(t("「{a}」を分離しました → 遠位側「{b}」。",
+                             a=v.name, b=name))
+        return new_vid
+
+    def connect_vessels(self, a: str, ea: str, b_: str, eb: str,
+                        vol=None, dims=None) -> str:
+        """「connect」: join two lines whose ends *ea* / *eb* ("first" /
+        "last") lie within the 接続 distance into ONE line. The line that
+        ENDS at the join keeps its identity (name / role / parent / file);
+        the other is appended (reversed if drawn the other way), the gap
+        bridged along the contrast lumen when the CT is given (straight
+        otherwise), its side branches re-attached, its file moved to a
+        _merged folder. Returns the kept vessel id, or "" (with a message)."""
+        uid = self._ct_of_vessel(a)
+        if not uid or uid != self._ct_of_vessel(b_) or a == b_:
+            self._warn(t("同じ CT の別々の 2 本の線の端を選んでください。"))
+            return ""
+        self._use_uid(uid)
+        bd = self._bundle()
+        tree = bd["tree"]
+        va, vb = tree.vessels.get(a), tree.vessels.get(b_)
+        if va is None or vb is None:
+            return ""
+
+        def end_pt(v, e):
+            return np.asarray(v.points[0] if e == "first" else v.points[-1],
+                              float)
+        gap = float(np.linalg.norm(end_pt(va, ea) - end_pt(vb, eb)))
+        if gap > _CONNECT_TOL_MM:
+            self._warn(t("2つの端が {d:.1f} mm 離れています（接続できるのは "
+                         "{tol:.0f} mm 以内）。", d=gap, tol=_CONNECT_TOL_MM))
+            return ""
+        # Which line keeps its identity: the one that ENDS at the join; with
+        # both ends alike, a root / an attached line / the longer one.
+        def rank(v):
+            return (v.role in ROOT_ROLES, v.parent is not None, v.n)
+        if (ea == "last") != (eb == "last"):
+            keep_a = ea == "last"
+        else:
+            keep_a = rank(va) >= rank(vb)
+        k, ek, d, ed = (a, ea, b_, eb) if keep_a else (b_, eb, a, ea)
+        vk, vd = tree.vessels[k], tree.vessels[d]
+
+        def ctrl_of(v):
+            c = v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2 else v.points
+            return [np.asarray(q, float) for q in c]
+        ck, cd = ctrl_of(vk), ctrl_of(vd)
+        if ek == "last":                          # K … join → D
+            if ed == "last":
+                cd = cd[::-1]
+            first, second = ck, cd
+        else:                                     # both "first": D⁻¹ → K
+            first, second = cd[::-1], ck
+        bridge = []
+        if vol is not None and dims is not None and gap > 1.0:
+            try:
+                from multi_dicomviewer.core.cpr_autotrack import trace_vessel
+                res = trace_vessel(vol, tuple(float(x) for x in dims),
+                                   [first[-1], second[0]])
+                if res is not None and res.ok and len(res.ctrl_mm) > 2:
+                    bridge = [np.asarray(q, float) for q in res.ctrl_mm[1:-1]]
+            except Exception:                            # noqa: BLE001
+                bridge = []
+        if float(np.linalg.norm(first[-1] - second[0])) < 0.5:
+            second = second[1:]
+        merged = np.asarray(first + bridge + second, float)
+        kids_d = [c for c, cv in tree.vessels.items() if cv.parent == d]
+        for c in kids_d:
+            tree.vessels[c].parent = k
+        if vk.parent == d:                        # K hung on D → D's place
+            vk.parent, vk.junction = vd.parent, vd.junction
+        self._set_vessel_ctrl(tree, k, merged)    # re-snaps every child of K
+        vk.auto_traced = bool(vk.auto_traced and vd.auto_traced)
+        vk.fin_traced = False
+        vk.ctrl_manual = None
+        tree.vessels.pop(d, None)
+        bd["hidden"].discard(d)
+        pk = bd["paths"].get(k, "") or ""
+        pd_ = bd["paths"].pop(d, "") or ""
+        if pk:
+            old = self._read_cpr(pk)
+            if old is not None:
+                self._write_cpr(pk, self._cpr_file_with(old, merged))
+        if pd_ and os.path.isfile(pd_):
+            try:                                  # keep it, out of the folder
+                mdir = os.path.join(os.path.dirname(pd_), "_merged")
+                os.makedirs(mdir, exist_ok=True)
+                os.replace(pd_, os.path.join(mdir, os.path.basename(pd_)))
+            except OSError:
+                pass
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(t("「{b}」を「{a}」に接続して 1 本にしました。",
+                             a=vk.name, b=vd.name))
+        return k
+
     def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
         """Replace a vessel's centreline (ctrl + resampled points) and re-snap the
         junction of each direct child onto the new line."""

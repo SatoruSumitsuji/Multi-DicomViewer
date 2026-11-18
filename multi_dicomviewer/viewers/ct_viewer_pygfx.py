@@ -3564,6 +3564,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 QTimer.singleShot(
                     0, lambda k=key, sx=x, sy=y: self._cpr_sel_menu(k, sx, sy))
                 return
+        # Tree line ENDS (connect): Shift+click toggles an end, Shift+drag a
+        # rectangle; a right-click with ends selected → 「connect」 (deferred).
+        if (self._coro_end_sel_ok(key) and self._draft is None
+                and not self._cpr_map_edit_ok(key)):
+            if self._drag_btn == 1:
+                if "Shift" in (ev.get("modifiers") or ()):
+                    self._cpr_band_start(key, x, y, ends=True)
+                    return
+                self._coro_end_sel_clear()
+            elif self._drag_btn == 2 and self._coro_end_sel_get():
+                self._reset_pointer_state()
+                QTimer.singleShot(
+                    0, lambda k=key, sx=x, sy=y: self._coro_end_menu(k, sx, sy))
+                return
         # Compare-select mode: a left-click picks the two shapes to compare.
         if self._cmp_on and self._drag_btn == 1:
             self._compare_pick(key, x, y)
@@ -8877,6 +8891,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._overlay[k].update()
 
     def _set_measure_type(self, key):
+        self._cpr_lasso_begin(key)       # Polygon = lasso on CPR lines
         self._meas_type = key
         self._draft = None
         self._meas_hover = None
@@ -10337,6 +10352,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             m["pts3d"] = [np.asarray(P, float) for P in d["pts3d"]]
         if self._lv_valve_redraw_commit(d["pane"], m):
             return                       # MV / AoV redraw (no measure)
+        if d["type"] == "polygon" and self._cpr_lasso_commit(d["pane"], pts):
+            self._redraw_meas(d["pane"])
+            return                       # CPR lasso (no measure)
         self._measures[d["pane"]].append(m)
         self._redraw_meas(d["pane"])
         if meas_before is not None:                  # general-Measure create undo
@@ -19820,6 +19838,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _coronary_draw(self):
         """Draw button on the coronary row — arm (or disarm) Measure + Polyline
         so a left-drag traces the vessel centreline."""
+        if self._cpr_lasso_restore():
+            return                                   # back from a Polygon lasso
         if self._cpr_tool_hold_on() and getattr(
                 self, "_coronary_mpr_pending", False):
             self._cpr_redraw()                       # on hold → resume, not disarm

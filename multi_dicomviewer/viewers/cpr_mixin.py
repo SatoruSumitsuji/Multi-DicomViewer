@@ -833,6 +833,15 @@ class CPRMixin:
             vid is not None and getattr(self, "_coro_resume_cb", None) is not None)
         edit_act = menu.addAction(t("編集 (Edit)"))
         edit_act.setEnabled(can_edit)
+        # 「ここで separate」: cut the registered line here into two lines.
+        sep_act = None
+        shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
+                 else None)
+        if (vid is not None and shell is not None
+                and hasattr(shell, "coronary_split_vessel")):
+            sep_act = menu.addAction(t("ここで separate（2本に分ける）"))
+            sep_act.setEnabled(
+                vid != (getattr(self, "_coro_edit_vid", "") or ""))
         names = getattr(self, "_coro_names", set())
         show_act = hide_all = None
         if vid is not None:
@@ -873,6 +882,9 @@ class CPRMixin:
             return
         if chosen is edit_act:
             self._cpr_tree_edit(which, sx, sy, mi, vid, gpos)
+            return
+        if sep_act is not None and chosen is sep_act:
+            self._coro_split_at(which, sx, sy, vid)
             return
         if desel_act is not None and chosen is desel_act:
             try:
@@ -1986,8 +1998,11 @@ class CPRMixin:
             self._redraw_geom(self._cpr.get("src"))
         return had
 
-    def _cpr_band_start(self, which, sx, sy) -> None:
+    def _cpr_band_start(self, which, sx, sy, ends: bool = False) -> None:
+        """Shift+drag start. *ends*: select tree line ENDS (for connect)
+        instead of the open line's edit points."""
         self._cpr_band = [which, float(sx), float(sy), float(sx), float(sy)]
+        self._cpr_band_ends = bool(ends)
 
     def _cpr_band_move(self, sx, sy) -> None:
         b = getattr(self, "_cpr_band", None)
@@ -2005,6 +2020,18 @@ class CPRMixin:
         if b is None:
             return
         which, x0, y0, x1, y1 = b
+        if getattr(self, "_cpr_band_ends", False):
+            self._cpr_band_ends = False
+            if abs(x1 - x0) < 4 and abs(y1 - y0) < 4:
+                self._coro_ends_select(which, click=(x1, y1), toggle=True)
+            else:
+                lx, hx = min(x0, x1), max(x0, x1)
+                ly, hy = min(y0, y1), max(y0, y1)
+                self._coro_ends_select(
+                    which, inside=lambda x, y: lx <= x <= hx and ly <= y <= hy)
+            for k in ("A", "B"):
+                self._redraw_geom(k)
+            return
         m = self._cpr_src_measure()
         if m is None:
             self._redraw_geom(which)
@@ -2087,16 +2114,18 @@ class CPRMixin:
         return k is not None and m is not None and k in self._cpr_gap_idx(m)
 
     def _cpr_sel_world_pts(self, key):
-        """Output-plane positions of the selected edit points on pane *key*."""
+        """Output-plane positions of the selected edit points on pane *key*
+        (+ the selected tree line ends, drawn the same way)."""
+        ends = self._coro_end_sel_world_pts(key)
         c = self._cpr
         if c is None or key != c.get("src"):
-            return []
+            return ends
         m = self._cpr_src_measure()
         sel = self._cpr_sel_get()
         if m is None or not sel:
-            return []
+            return ends
         pts = m.get("pts") or []
-        return [pts[k] for k in sorted(sel) if k < len(pts)]
+        return [pts[k] for k in sorted(sel) if k < len(pts)] + ends
 
     @staticmethod
     def _cpr_smooth_pts(p3, sel, iters: int = 3, lam: float = 0.5):
@@ -2185,6 +2214,255 @@ class CPRMixin:
             self._cpr_sel_apply("smooth")
         elif chosen is a_clr:
             self._cpr_sel_clear()
+
+    # ---- CoronaryTree line ENDS: Shift / Polygon select → connect ----------
+    # (user 2026-11-18) Shift+click an end of a drawn tree line (toggle),
+    # Shift+drag a rectangle, or draw a Polygon around ends; a right-click
+    # with two ends selected offers 「connect」 (two lines → one).
+    _CORO_END_PX = 12.0
+
+    def _coro_work_on(self) -> bool:
+        """CoronaryTree work: the CPR session or CoronaryTreeモード."""
+        if getattr(self, "_coronary_mode", False):
+            return True
+        f = getattr(self, "_ct_current_mode", None)
+        try:
+            return callable(f) and f() == "coronary"
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _coro_line_ends(self):
+        """[(vid, "first" | "last", P3)] of the tree lines drawn now."""
+        spec = getattr(self, "_coro_overlay", None) \
+            if getattr(self, "_mode", "3D") == "3D" else None
+        out = []
+        for ves in spec or []:
+            pts = ves.get("points")
+            vid = ves.get("vid")
+            if vid is None or pts is None or len(pts) < 2:
+                continue
+            out.append((vid, "first", np.asarray(pts[0], float)))
+            out.append((vid, "last", np.asarray(pts[-1], float)))
+        return out
+
+    def _coro_end_sel_ok(self, which) -> bool:
+        if getattr(self, "_mode", "3D") != "3D":
+            return False
+        if (getattr(self, "_vr_on", {}) or {}).get(which):
+            return False
+        return self._coro_work_on() and bool(self._coro_line_ends())
+
+    def _coro_end_sel_get(self) -> set:
+        """Selected line ends {(vid, end)} still drawn now."""
+        sel = getattr(self, "_coro_end_sel", None) or set()
+        live = {(v, e) for v, e, _ in self._coro_line_ends()}
+        sel = {x for x in sel if x in live}
+        self._coro_end_sel = sel
+        return set(sel)
+
+    def _coro_end_screen(self, which, P):
+        return self._cpr_screen_xy(which, self._world3d_to_out(which, P))
+
+    def _coro_ends_select(self, which, inside=None, click=None,
+                          toggle=False) -> None:
+        """Select ends: those *inside* (screen-point predicate) or the one
+        nearest *click* (toggled)."""
+        ends = self._coro_line_ends()
+        sel = self._coro_end_sel_get() if toggle else set()
+        if click is not None:
+            best, hit = self._CORO_END_PX, None
+            for vid, e, P in ends:
+                qx, qy = self._coro_end_screen(which, P)
+                dd = math.hypot(qx - click[0], qy - click[1])
+                if dd < best:
+                    best, hit = dd, (vid, e)
+            if hit is not None:
+                sel ^= {hit}
+        elif inside is not None:
+            for vid, e, P in ends:
+                if inside(*self._coro_end_screen(which, P)):
+                    sel.add((vid, e))
+        self._coro_end_sel = sel
+
+    def _coro_end_sel_clear(self) -> bool:
+        had = bool(getattr(self, "_coro_end_sel", None))
+        self._coro_end_sel = set()
+        if had:
+            for k in ("A", "B"):
+                self._redraw_geom(k)
+        return had
+
+    def _coro_end_sel_world_pts(self, key):
+        sel = self._coro_end_sel_get()
+        if not sel or (getattr(self, "_vr_on", {}) or {}).get(key):
+            return []
+        return [self._world3d_to_out(key, P)
+                for vid, e, P in self._coro_line_ends() if (vid, e) in sel]
+
+    def _coro_connect_pair(self):
+        """The two selected ends when they can be connected: ((vid, end),
+        (vid, end)) of two different lines, else None."""
+        sel = sorted(self._coro_end_sel_get())
+        if len(sel) != 2 or sel[0][0] == sel[1][0]:
+            return None
+        return sel[0], sel[1]
+
+    def _coro_end_menu(self, which, sx, sy) -> None:
+        """Right-click with line ends selected: 「connect」 / 選択解除."""
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+        sel = self._coro_end_sel_get()
+        if not sel:
+            return
+        pair = self._coro_connect_pair()
+        menu = QMenu(self)
+        a_con = menu.addAction(t("connect（2つの端をつないで1本にする）"))
+        a_con.setEnabled(pair is not None)
+        if pair is None:
+            a_con.setToolTip(t("別々の 2 本の線の端を 2 つ選んでください。"))
+        menu.addSeparator()
+        a_clr = menu.addAction(t("選択解除"))
+        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+            QPoint(int(sx), int(sy))))
+        if hasattr(self, "_reset_pointer_state"):
+            self._reset_pointer_state()
+        if chosen is a_con and pair is not None:
+            self._coro_connect(*pair)
+        elif chosen is a_clr:
+            self._coro_end_sel_clear()
+
+    def _coro_connect(self, ea, eb) -> bool:
+        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell") \
+            else None
+        if shell is None or not hasattr(shell, "coronary_connect_vessels"):
+            return False
+        ok = bool(shell.coronary_connect_vessels(self, ea[0], ea[1],
+                                                 eb[0], eb[1]))
+        if ok:
+            self._coro_end_sel_clear()
+        return ok
+
+    def _coro_split_at(self, which, sx, sy, vid) -> bool:
+        """「ここで separate」 on a tree line: cut it at the clicked sample."""
+        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell") \
+            else None
+        if shell is None or not hasattr(shell, "coronary_split_vessel"):
+            return False
+        pick = getattr(self, "_coronary_pick_sample", None)
+        if (getattr(self, "_vr_on", {}) or {}).get(which) \
+                and hasattr(self, "_coronary_pick_sample_vr"):
+            pick = self._coronary_pick_sample_vr
+        svid, idx = pick(which, sx, sy) if pick is not None else (None, None)
+        if svid is None or idx is None:
+            return False
+        return bool(shell.coronary_split_vessel(self, svid, int(idx)))
+
+    # ---- Polygon = lasso while setting CPR lines (user 2026-11-18) ----------
+    @staticmethod
+    def _in_poly(x, y, poly) -> bool:
+        inside = False
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            if (y1 > y) != (y2 > y):
+                xc = x1 + (y - y1) * (x2 - x1) / ((y2 - y1) or 1e-12)
+                if x < xc:
+                    inside = not inside
+        return inside
+
+    def _cpr_lasso_ctx(self) -> bool:
+        return getattr(self, "_mode", "3D") == "3D" and self._coro_work_on()
+
+    def _cpr_lasso_begin(self, key) -> None:
+        """_set_measure_type hook: Polygon picked while working on CPR lines
+        → it becomes a lasso; Draw stops (its unfinished trace kept and
+        restored after the lasso, or by the Draw button)."""
+        if getattr(self, "_cpr_lasso_restoring", False):
+            return
+        if key != "polygon" or not self._cpr_lasso_ctx():
+            return
+        if getattr(self, "_cpr_lasso_stash", None) is not None:
+            return                                   # already in a lasso
+        d = getattr(self, "_draft", None)
+        self._cpr_lasso_stash = {
+            "type": getattr(self, "_meas_type", None),
+            "draft": d if (d and d.get("type") == "polyline") else None,
+            "pending": bool(getattr(self, "_coronary_mpr_pending", False)),
+            "hold": bool(getattr(self, "_cpr_tool_hold", False)),
+        }
+        self._coronary_mpr_pending = False
+        self._cpr_tool_hold = False
+        if hasattr(self, "_coronary_sync_ui"):
+            try:
+                self._coronary_sync_ui()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _cpr_lasso_restore(self) -> bool:
+        """Back from the lasso to what was going on (Draw + its unfinished
+        trace, or the plain edit). True if there was a lasso."""
+        st = getattr(self, "_cpr_lasso_stash", None)
+        if st is None:
+            return False
+        self._cpr_lasso_stash = None
+        self._cpr_lasso_restoring = True
+        try:
+            if getattr(self, "_meas_on", False):
+                self._set_measure_type(st["type"])
+            if st["draft"] is not None:
+                self._draft = st["draft"]
+            self._coronary_mpr_pending = st["pending"]
+            self._cpr_tool_hold = st["hold"]
+        finally:
+            self._cpr_lasso_restoring = False
+        if hasattr(self, "_coronary_sync_ui"):
+            try:
+                self._coronary_sync_ui()
+            except Exception:                            # noqa: BLE001
+                pass
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        return True
+
+    def _cpr_lasso_commit(self, which, pts_out) -> bool:
+        """A finished Polygon while working on CPR lines: select what lies
+        inside (the open line's edit points on its map pane, the tree line
+        ends), drop the polygon, open the menu for the selection. True = it
+        was a lasso (no Polygon measurement is made)."""
+        if getattr(self, "_cpr_lasso_stash", None) is None \
+                or not self._cpr_lasso_ctx() or len(pts_out) < 3:
+            return False
+        poly = [self._cpr_screen_xy(which, q) for q in pts_out]
+
+        def inside(x, y):
+            return self._in_poly(x, y, poly)
+        c = getattr(self, "_cpr", None)
+        n_edit = 0
+        m = self._cpr_src_measure() if c is not None else None
+        if m is not None and which == c.get("src"):
+            sel = {k for k, q in enumerate(m.get("pts") or [])
+                   if inside(*self._cpr_screen_xy(which, q))}
+            self._cpr_sel_set(sel)
+            n_edit = len(sel)
+        self._coro_ends_select(which, inside=inside)
+        n_end = len(self._coro_end_sel_get())
+        sx, sy = poly[-1]
+        from PyQt6.QtCore import QTimer
+
+        def menu():
+            try:
+                if n_edit:
+                    self._cpr_lasso_restore()        # map edit state for it
+                    self._cpr_sel_menu(which, sx, sy)
+                elif n_end:
+                    self._coro_end_menu(which, sx, sy)
+            finally:
+                self._cpr_lasso_restore()
+                for k in ("A", "B"):
+                    self._redraw_geom(k)
+        QTimer.singleShot(0, menu)                   # out of the pointer handler
+        return True
 
     # ---- VR始点: pick the vessel's PROXIMAL start on a VR pane -------------
     # The left pane A shows a heart VR while Draw is armed; a click (no drag)
