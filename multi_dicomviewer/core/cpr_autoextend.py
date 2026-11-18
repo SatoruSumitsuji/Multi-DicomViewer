@@ -265,6 +265,8 @@ class _Tracer:
         self.progress = progress       # fn(stage, line_mm, total_mm, k, n)
         self.stage = ("trunk", 0, 0)
         self.log = log if log is not None else []
+        self.last_rej = []
+        self.last_n_regions = 0
         # fn(line_id, depth, path (N,3), course) after every accepted point;
         # returning False stops here (the trace so far is kept)
         self.on_step = on_step
@@ -304,22 +306,38 @@ class _Tracer:
         regs = _regions(self.V, Q, d, thr, prm.search_mm, prm.grid_mm)
         out, chamber, n_tr = [], False, 0
         hu_min = self.bg + prm.hu_frac * (lumen - self.bg)
+        conn = self._conn(lumen)
+        rej = []                       # why each region was not taken (log)
+        self.last_rej = rej
+        self.last_n_regions = len(regs)
         for g in regs:
             c = g["c"]
             w = _unit(c - P)
             ang = _angle(w, d)
+            info = {"c": _r3(c), "r": round(g["r"], 2),
+                    "hu": round(g["hu"], 1), "ang": round(ang, 1),
+                    "off_mm": round(float(np.linalg.norm(c - Q)), 2)}
             if ang > prm.max_ang_deg:
+                rej.append({**info, "why": "angle"})
                 continue
-            if _seg_min(self.V, P, c) <= self._conn(lumen):
+            smin = _seg_min(self.V, P, c)
+            if smin <= conn:
+                rej.append({**info, "why": "not_connected",
+                            "seg_min": round(smin, 1), "need": round(conn, 1)})
                 continue                         # not connected (fat gap)
             if g["big"] or g["r"] > prm.max_radius_mm * 1.3:
-                if np.linalg.norm(c - Q) < max(2.5, 2.0 * r):
+                near = bool(np.linalg.norm(c - Q) < max(2.5, 2.0 * r))
+                if near:
                     chamber = True
+                rej.append({**info, "why": "chamber" if near else "big",
+                            "area": round(g["area"], 1)})
                 continue
             if self._traced(c, own):
                 n_tr += 1
+                rej.append({**info, "why": "traced"})
                 continue
             if g["hu"] < hu_min:
+                rej.append({**info, "why": "low_hu", "need": round(hu_min, 1)})
                 continue
             out.append({"c": c, "w": w, "r": g["r"], "hu": g["hu"],
                         "ang": ang, "s": s, "how": "disc"})
@@ -501,6 +519,9 @@ class _Tracer:
             # always the section step_mm (3 mm) ahead
             cands, chamber, n_tr = self._cands(P, d, prm.step_mm, thr, lumen,
                                                r, own)
+            rec["regions"] = self.last_n_regions
+            if self.last_rej:
+                rec["rejected"] = list(self.last_rej)
             if depth == 0 and length < 1e-6 and not chamber:
                 # the trunk's start: lumen leaving sideways (carina)
                 for c in self._ray_cands(P, d, thr, lumen, 0.0,
@@ -570,11 +591,14 @@ class _Tracer:
             if rn > prm.max_radius_mm or rn > prm.radius_jump * max(r, 0.8):
                 stop = "widening"
                 rec["event"] = "widens"
+                rec["limit"] = round(min(prm.max_radius_mm,
+                                         prm.radius_jump * max(r, 0.8)), 2)
                 self.log.append(rec)
                 break
             if rn < prm.min_radius_mm:
                 stop = "thin"
                 rec["event"] = "too thin"
+                rec["limit"] = prm.min_radius_mm
                 self.log.append(rec)
                 break
             dn = _unit(C - P)
@@ -822,3 +846,34 @@ def save_log(log, folder=None, keep: int = 30) -> str:
         return path
     except Exception:                                    # noqa: BLE001
         return ""
+
+
+def stop_detail(log) -> dict:
+    """What the trunk's LAST step saw (for the result dialog): the step
+    number, mm traced, how many lumen regions the 3 mm section had and why
+    each was not taken (with the values), and the event."""
+    steps = [e for e in log if e.get("line") == 0 and "step" in e]
+    head = next((e for e in log if "lumen" in e and "bg" in e
+                 and "start" in e), {})
+    if not steps:
+        return {}
+    e = steps[-1]
+    why = {}
+    for r_ in e.get("rejected", []):
+        why.setdefault(r_["why"], []).append(r_)
+    mm = 0.0
+    pts = [np.asarray(x["P"], float) for x in steps]
+    if len(pts) > 1:
+        mm = float(np.linalg.norm(np.diff(np.asarray(pts), axis=0),
+                                  axis=1).sum())
+    # the section the last step looked at (step_mm ahead of its point)
+    step_mm = float((head.get("params") or {}).get("step_mm", 3.0))
+    q = None
+    if e.get("P") is not None and e.get("d") is not None:
+        q = [round(float(a + step_mm * b), 3)
+             for a, b in zip(e["P"], e["d"])]
+    return {"step": int(e["step"]), "mm": round(mm, 1), "q": q,
+            "regions": int(e.get("regions", 0)), "event": e.get("event", ""),
+            "why": why, "lumen0": head.get("lumen"), "bg": head.get("bg"),
+            "lumen": e.get("lumen"), "thr": e.get("thr"), "r": e.get("r"),
+            "pick": e.get("pick"), "limit": e.get("limit")}

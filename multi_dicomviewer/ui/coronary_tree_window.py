@@ -3425,7 +3425,8 @@ class CoronaryTreeWindow(SnapDock):
         ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
                           else v.points, float)
         res = extend_vessel(vol, dims, ctrl, cancel=cancel, progress=progress)
-        from multi_dicomviewer.core.cpr_autoextend import save_log
+        from multi_dicomviewer.core.cpr_autoextend import (save_log,
+                                                           stop_detail)
         log_path = save_log(res.log)
         trunk_mm = 0.0
         if res.trunk is not None:
@@ -3449,7 +3450,8 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
         out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
                "found": len(res.branches),
-               "lost": len(res.branches) - len(made), "log_path": log_path}
+               "lost": len(res.branches) - len(made), "log_path": log_path,
+               "detail": stop_detail(res.log)}
         self._hint.setText(self.auto_extend_text(v.name, out))
         return out
 
@@ -3458,6 +3460,12 @@ class CoronaryTreeWindow(SnapDock):
         lost = int(out.get("lost", 0) or 0)
         tail = ("\n" + t("⚠ 見つかった分枝 {k} 本を登録できませんでした。", k=lost)
                 if lost else "")
+        det = cls.detail_text(out.get("detail") or {})
+        if det:
+            tail += "\n\n" + det
+        if out.get("probe_shown"):
+            tail += "\n" + t("左ペイン: 止まった断面（最後の点から 3 mm 先）を表示中"
+                              "（OK で元に戻ります）")
         if out.get("log_path"):
             tail += "\n" + t("診断ログ: {p}", p=out["log_path"])
         if not out["trunk_mm"] and not out["branches"]:
@@ -3466,6 +3474,49 @@ class CoronaryTreeWindow(SnapDock):
         return t("「{n}」を {mm:.0f} mm 延長、分枝 {k} 本を追加しました"
                  "（幹の停止: {s}）。", n=name, mm=out["trunk_mm"],
                  k=len(out["branches"]), s=cls.stop_text(out["stop"])) + tail
+
+    @staticmethod
+    def detail_text(dt) -> str:
+        """Why the trunk stopped: what the last 3 mm section held and why
+        each lumen region there was not taken (values included)."""
+        if not dt:
+            return ""
+        L = [t("最後の断面: {k} 歩目（{mm:.0f} mm）、3 mm 先の内腔候補 {n} 個",
+               k=dt.get("step", 0), mm=dt.get("mm", 0.0),
+               n=dt.get("regions", 0))]
+        if dt.get("lumen") is not None and dt.get("bg") is not None:
+            L.append(t("基準: 内腔 {a:.0f} HU / 背景 {b:.0f} HU / 閾値 {c:.0f} HU"
+                       " / 径 {r:.1f} mm", a=float(dt["lumen"]),
+                       b=float(dt["bg"]), c=float(dt.get("thr") or 0),
+                       r=float(dt.get("r") or 0)))
+        why = dt.get("why") or {}
+        if not dt.get("regions") and dt.get("event") == "nothing found":
+            L.append("・" + t("3 mm 先の断面（半径 5 mm）に閾値を超える内腔なし"))
+        for k, lst in why.items():
+            n = len(lst)
+            if k == "low_hu":
+                L.append("・" + t("造影が薄い: {k} 個（最高 {a:.0f} HU < 必要 "
+                                  "{b:.0f} HU）", k=n,
+                                  a=max(x["hu"] for x in lst),
+                                  b=lst[0].get("need", 0)))
+            elif k == "not_connected":
+                L.append("・" + t("今の点とつながっていない: {k} 個（途中の最低 "
+                                  "{a:.0f} HU < 必要 {b:.0f} HU）", k=n,
+                                  a=max(x.get("seg_min", 0) for x in lst),
+                                  b=lst[0].get("need", 0)))
+            elif k == "chamber":
+                L.append("・" + t("心腔・大動脈など太い領域: {k} 個", k=n))
+            elif k == "big":
+                L.append("・" + t("離れた太い領域: {k} 個", k=n))
+            elif k == "traced":
+                L.append("・" + t("追跡済みの線の上: {k} 個", k=n))
+            elif k == "angle":
+                L.append("・" + t("進行方向から 75° 以上: {k} 個", k=n))
+        pk = dt.get("pick") or {}
+        if dt.get("event") in ("too thin", "widens") and pk:
+            L.append("・" + t("採用した内腔の径 {r:.2f} mm（限度 {l} mm）",
+                              r=float(pk.get("r", 0)), l=dt.get("limit")))
+        return "\n".join(L)
 
     def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
         """Replace a vessel's centreline (ctrl + resampled points) and re-snap the

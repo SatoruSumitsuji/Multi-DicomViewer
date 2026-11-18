@@ -4060,13 +4060,15 @@ class MainWindow(QMainWindow):
                                     w=None) -> None:
         """Result line of 自動追跡 (Coronary Tree hint + status bar)."""
         w = w or getattr(self, "_corotree_win", None)
-        if w is None or not hasattr(w, "auto_extend_text"):
-            return
-        txt = w.auto_extend_text(name or t("CPR線"), out)
-        try:
-            w._hint.setText(txt)
-        except Exception:                                # noqa: BLE001
-            pass
+        # the dialog is shown even without the Coronary Tree dock open
+        from multi_dicomviewer.ui.coronary_tree_window import (
+            CoronaryTreeWindow)
+        txt = CoronaryTreeWindow.auto_extend_text(name or t("CPR線"), out)
+        if w is not None:
+            try:
+                w._hint.setText(txt)
+            except Exception:                            # noqa: BLE001
+                pass
         sb = self.statusBar() if hasattr(self, "statusBar") else None
         if sb is not None:
             sb.showMessage(txt.replace("\n", " "), 15000)

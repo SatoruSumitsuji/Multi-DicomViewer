@@ -402,6 +402,39 @@ check("a short narrowing is bridged, steps still 3 mm",
       tpn[-1][2] > 70 and spn.max() < 3.4
       and any(e.get("event") == "bridged a narrowing" for e in rn_.log),
       (tpn[-1].round(1), round(float(spn.max()), 2)))
+# why it stopped: the last 3 mm section's regions and why each was not
+# taken (values) — in the log and in the result text
+from multi_dicomviewer.core.cpr_autoextend import stop_detail  # noqa: E402
+v = new()
+tube(v, [30, 30, 5], [30, 30, 40], 1.5)
+tube(v, [30, 30, 40], [30, 30, 75], 1.5, hu=240.0)
+rf_ = extend_vessel(noise(v, 6), D3, ctrl)
+dt_ = stop_detail(rf_.log)
+txt_ = CoronaryTreeWindow.auto_extend_text(
+    "x", {"trunk_mm": 10.0, "branches": [], "stop": rf_.stop, "detail": dt_})
+check("stop detail: faint lumen ahead named with its HU and the need",
+      "low_hu" in dt_.get("why", {}) and dt_["regions"] >= 1
+      and dt_["why"]["low_hu"][0]["need"] > dt_["why"]["low_hu"][0]["hu"]
+      and "HU" in txt_ and str(dt_["step"]) in txt_, txt_)
+v = new()
+tube(v, [30, 30, 5], [30, 30, 40], 1.5)
+tube(v, [30, 30, 44.5], [30, 30, 75], 1.5)
+dg_ = stop_detail(extend_vessel(noise(v, 1), D3, ctrl).log)
+check("stop detail: a vessel beyond fat = not connected",
+      "not_connected" in dg_.get("why", {}), dg_.get("why", {}).keys())
+# the shell shows the result dialog even with the Coronary Tree dock closed
+from types import SimpleNamespace  # noqa: E402
+from multi_dicomviewer.ui.main_window import MainWindow  # noqa: E402
+shown.clear()
+MainWindow.coronary_auto_extend_report(
+    SimpleNamespace(_corotree_win=None, statusBar=lambda: None), None,
+    {"trunk_mm": 0.0, "branches": [], "stop": "lumen", "detail": dt_})
+check("result dialog shown without the Coronary Tree dock", len(shown) == 1)
+# the stop section: q = 3 mm beyond the last step's point along its course
+lst = [e for e in rf_.log if e.get("line") == 0 and "step" in e][-1]
+check("stop detail carries the stop section point (3 mm ahead)",
+      dt_.get("q") is not None and abs(np.linalg.norm(
+          np.asarray(dt_["q"]) - np.asarray(lst["P"])) - 3.0) < 0.05)
 # progress reported while tracing (trunk mm, then branch k / n)
 stages = []
 extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(

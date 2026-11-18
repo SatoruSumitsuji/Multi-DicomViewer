@@ -2402,7 +2402,8 @@ class CPRMixin:
         import traceback
         from PyQt6.QtWidgets import QApplication
         from multi_dicomviewer.core.cpr_autoextend import (extend_vessel,
-                                                           save_log)
+                                                           save_log,
+                                                           stop_detail)
         from multi_dicomviewer.ui.autotrack_progress import (
             AutoTrackProgress, show_result)
         m = self._measures[which][mi]
@@ -2506,15 +2507,70 @@ class CPRMixin:
             return None
         out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
                "found": len(res.branches), "lost": lost,
-               "log_path": save_log(res.log)}
-        if shell is not None and hasattr(shell, "coronary_auto_extend_report"):
-            shell.coronary_auto_extend_report(self, out)
-        else:
-            from multi_dicomviewer.ui.coronary_tree_window import (
-                CoronaryTreeWindow)
-            show_result(self.window(),
-                        CoronaryTreeWindow.auto_extend_text(t("CPR線"), out))
+               "log_path": save_log(res.log),
+               "detail": stop_detail(res.log)}
+        # while the result is read: the LEFT pane shows the section where it
+        # stopped (3 mm beyond the last point) — a temporary end point, not
+        # saved / not in undo, removed when the dialog is closed
+        keep = self._cpr_autotrack_probe(which, mi, m, out, res.stop)
+        try:
+            if shell is not None and hasattr(shell,
+                                             "coronary_auto_extend_report"):
+                shell.coronary_auto_extend_report(self, out)
+            else:
+                from multi_dicomviewer.ui.coronary_tree_window import (
+                    CoronaryTreeWindow)
+                show_result(self.window(),
+                            CoronaryTreeWindow.auto_extend_text(t("CPR線"),
+                                                                out))
+        finally:
+            if keep is not None:
+                self._cpr_autotrack_probe_end(which, mi, m, keep)
         return out
+
+    def _cpr_autotrack_probe(self, which, mi, m, out, stop):
+        """Show the stop section in the left pane: the line gets a TEMPORARY
+        end point there and its short-axis lands on it. Returns the points
+        to restore, or None when not shown."""
+        q = (out.get("detail") or {}).get("q")
+        if (q is None or stop == "cancel" or self._cpr is None
+                or not self._cpr_is_src(which, mi)):
+            return None
+        try:
+            keep = [list(map(float, p)) for p in (m.get("pts3d") or [])]
+            if len(keep) < 2:
+                return None
+            self._cpr_set_ctrl(m, which, keep + [list(map(float, q))])
+            self._cpr_rebuild()
+            idxs = self._cpr_ctrl_indices()
+            if idxs:
+                self._cpr["idx"] = int(idxs[-1])
+            self._cpr_sync_bar()
+            self._cpr_center_map_on_current()
+            self._redraw_meas(which)
+            self._refresh()
+            out["probe_shown"] = True
+            return keep
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _cpr_autotrack_probe_end(self, which, mi, m, keep) -> None:
+        try:
+            self._cpr_set_ctrl(m, which, keep)
+            if self._cpr is not None and self._cpr_is_src(which, mi):
+                self._cpr_rebuild()
+                idxs = self._cpr_ctrl_indices()
+                if idxs:
+                    self._cpr["idx"] = int(idxs[-1])
+                self._cpr_sync_bar()
+                self._cpr_center_map_on_current()
+            self._redraw_meas(which)
+            self._refresh()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
     _AUTOTRACK_STEP_S = 0.35          # pause per Auto-Track step (watchable)
 
