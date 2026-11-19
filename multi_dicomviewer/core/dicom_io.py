@@ -1194,6 +1194,62 @@ def _jfif_rgb_override(ds, index: int):
     return None
 
 
+_RLE_LOSSLESS = "1.2.840.10008.1.2.5"
+
+
+def _rle_tolerant_frame(ds, index: int):
+    """RLE Lossless frame decoded LENIENTLY: each segment is padded / cut to
+    Rows x Columns bytes. Some ultrasound devices write every RLE segment one
+    byte short (147455 vs 147456) and pydicom then refuses the whole file
+    ("Unable to decode as exceptions were raised by all available plugins").
+    Returns None when this is not an RLE dataset or it cannot be parsed."""
+    try:
+        ts = str(getattr(getattr(ds, "file_meta", None),
+                         "TransferSyntaxUID", ""))
+        if ts != _RLE_LOSSLESS:
+            return None
+        from pydicom.encaps import generate_frames
+        from pydicom.pixels.decoders.rle import (_rle_decode_segment,
+                                                 _rle_parse_header)
+        frames = getattr(ds, "_mdv_rle_frames", None)
+        if frames is None:
+            n = int(getattr(ds, "NumberOfFrames", 1) or 1)
+            frames = list(generate_frames(ds.PixelData, number_of_frames=n))
+            ds._mdv_rle_frames = frames
+        fr = frames[min(max(int(index), 0), len(frames) - 1)]
+        rows, cols = int(ds.Rows), int(ds.Columns)
+        npx = rows * cols
+        spp = int(getattr(ds, "SamplesPerPixel", 1) or 1)
+        bps = max(1, int(getattr(ds, "BitsAllocated", 8) or 8) // 8)
+        offs = [o for o in _rle_parse_header(fr[:64])]
+        if len(offs) < spp * bps:
+            return None
+        ends = offs[1:] + [len(fr)]
+        planes = []
+        for o, e in zip(offs, ends):
+            seg = _rle_decode_segment(fr[o:e])
+            if len(seg) < npx:
+                seg = bytes(seg) + bytes(npx - len(seg))
+            planes.append(np.frombuffer(bytes(seg[:npx]), np.uint8))
+        out = []
+        for s_ in range(spp):
+            pl = planes[s_ * bps:(s_ + 1) * bps]       # MSB byte first
+            if bps == 1:
+                v = pl[0]
+            else:
+                v = np.zeros(npx, np.uint64)
+                for b, p_ in enumerate(pl):
+                    v |= p_.astype(np.uint64) << np.uint64(8 * (bps - 1 - b))
+                dt = {2: np.uint16, 4: np.uint32}.get(bps, np.uint64)
+                v = v.astype(dt)
+                if int(getattr(ds, "PixelRepresentation", 0) or 0) == 1:
+                    v = v.view({2: np.int16, 4: np.int32}.get(bps, np.int64))
+            out.append(v.reshape(rows, cols))
+        return out[0] if spp == 1 else np.stack(out, axis=-1)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
 def _raw_frame(ds, index: int) -> np.ndarray:
     """Decoded pixels for one frame, color space untouched.
 
@@ -1217,6 +1273,10 @@ def _raw_frame(ds, index: int) -> np.ndarray:
         if getattr(ds, "_mdv_is_stack", False):
             return cached[min(index, len(cached) - 1)]
         return cached
+    if getattr(ds, "_mdv_rle_tol", False):          # a short-segment RLE file
+        arr = _rle_tolerant_frame(ds, index)
+        if arr is not None:
+            return arr
     fast = _fast_raw_frame(ds, index)
     if fast is not None:
         return fast
@@ -1225,7 +1285,19 @@ def _raw_frame(ds, index: int) -> np.ndarray:
             return np.asarray(pixel_array(ds, index=index))
         except Exception:
             ds._mdv_no_index = True
-    arr = np.asarray(ds.pixel_array)
+            # RLE written slightly short by the device: decode leniently
+            arr = _rle_tolerant_frame(ds, index)
+            if arr is not None:
+                ds._mdv_rle_tol = True
+                return arr
+    try:
+        arr = np.asarray(ds.pixel_array)
+    except Exception:
+        arr = _rle_tolerant_frame(ds, index)
+        if arr is None:
+            raise
+        ds._mdv_rle_tol = True
+        return arr
     is_stack = arr.ndim == 4 or (arr.ndim == 3 and arr.shape[-1] not in (3, 4))
     ds._mdv_full = arr
     ds._mdv_is_stack = is_stack
