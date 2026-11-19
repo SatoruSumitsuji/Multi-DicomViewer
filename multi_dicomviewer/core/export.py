@@ -213,6 +213,25 @@ def _unique_path(path: str) -> str:
         i += 1
 
 
+def study_folder(out_dir: str, series_list: list[Series], kind: str = "",
+                 anon: bool = False) -> str:
+    """検査ごとの書き出し: create and return a NEW folder for one study under
+    *out_dir*, named <study date>_<kind>_study (+ _anon) — no patient name /
+    ID in it (safe for an anonymized export too); never overwrites."""
+    date = ""
+    for s in series_list:
+        date = _fmt_date(getattr(s, "acq_time", "") or "")
+        if date:
+            break
+    kind = _safe_name(kind or (series_list[0].kind if series_list else ""))
+    name = "_".join(p for p in (date, kind, "study") if p)
+    if anon:
+        name += "_anon"
+    path = _unique_path(os.path.join(out_dir, _safe_name(name) or "study"))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 # --------------------------------------------------------------- DICOM
 def export_dicom(series_list: list[Series],
                  out_dir: str,

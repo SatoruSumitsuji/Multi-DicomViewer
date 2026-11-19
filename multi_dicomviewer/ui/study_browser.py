@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import dicom_io
 from multi_dicomviewer.core.anonymize import ANON_PLACEHOLDER
-from multi_dicomviewer.core.study_model import Patient, Series
+from multi_dicomviewer.core.study_model import Modality, Patient, Series
 from multi_dicomviewer.i18n import t
 
 _ROLE = Qt.ItemDataRole.UserRole
@@ -831,6 +831,33 @@ class StudyBrowser(QTreeWidget):
                 out.append(trip)
         return out or [(kind, key, label)]
 
+    def _study_export_groups(self, su: str, sk: str) -> list[dict]:
+        """検査ごとの書き出し: every selected study node (the right-clicked
+        one when none) of an XA / IVUS-OCT-OFDI kind → [{kind, series,
+        hidden}] — its un-hidden series in display order (the greyed,
+        Hidden series are left out). CT / UCG etc. are not offered."""
+        nodes, seen = [], set()
+        for it in self.selectedItems():
+            idk = it.data(0, _ID_ROLE)
+            if idk and idk[0] == "S" and (idk[1], idk[2]) not in seen:
+                seen.add((idk[1], idk[2]))
+                nodes.append((idk[1], idk[2]))
+        if (su, sk) not in seen:
+            nodes = [(su, sk)]
+        out = []
+        for u, k in nodes:
+            ser = self.series_in_study(u, k)
+            if not ser or not all(
+                    getattr(s, "modality", None) in (Modality.XA,
+                                                     Modality.IVUS)
+                    for s in ser):
+                continue
+            keep = [s for s in ser if not getattr(s, "hidden", False)]
+            if keep:
+                out.append({"kind": k, "series": keep,
+                            "hidden": len(ser) - len(keep)})
+        return out
+
     def _emit_delete_targets(self, targets: list[tuple]) -> None:
         for k, key, label in targets:
             self.delete_requested.emit(k, key, label)
@@ -930,6 +957,31 @@ class StudyBrowser(QTreeWidget):
         menu.addSeparator()
         if kind == "study":
             su, sk_ = idk[1], idk[2]
+            # 検査ごとの書き出し (XA / IVUS-OCT-OFDI): every series of the study
+            # in ONE export, a folder per study (user 2026-11-19)
+            groups = self._study_export_groups(su, sk_)
+            if groups:
+                n_ser = sum(len(g["series"]) for g in groups)
+                n_hid = sum(g["hidden"] for g in groups)
+                suf = (t(" ({n} studies, {m} series)", n=len(groups), m=n_ser)
+                       if len(groups) > 1 else t(" ({m} series)", m=n_ser))
+                if n_hid:
+                    suf += t(" — {h} hidden excluded", h=n_hid)
+                for fmt_, lab in (("dicom", t("Export study (DICOM)")),
+                                  ("anon-dicom",
+                                   t("Export study (Anon DICOM)")),
+                                  ("mp4", t("Export study (MP4)")),
+                                  ("csv", t("Export study (CSV)"))):
+                    a_ = QAction(lab + suf, self)
+                    a_.setToolTip(t(
+                        "Export every series of this study (Hidden series "
+                        "excluded) into one folder per study; inside it the "
+                        "same files as the per-series export."))
+                    a_.triggered.connect(
+                        lambda _=False, f=fmt_, g=groups:
+                        self.export_requested.emit("study-" + f, list(g)))
+                    menu.addAction(a_)
+                menu.addSeparator()
             # Select — show only the un-hidden series rows. Hidden (greyed)
             # series are folded out of the list; their hide state is kept.
             act_select = QAction(t("Select (show unhide only)"), self)

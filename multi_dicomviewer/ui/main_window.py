@@ -8304,6 +8304,15 @@ class MainWindow(QMainWindow):
         + current W/L). The Studies-list export leaves it False, so it always
         writes the ORIGINAL image regardless of on-screen state. DICOM (verbatim
         copy) and CSV (tag data) ignore it either way."""
+        # 検査ごとの書き出し (Studies list ▸ study node): *series_list* holds
+        # [{kind, series}] per study — one output folder per study, inside
+        # it exactly what the per-series export writes
+        groups = None
+        if isinstance(fmt, str) and fmt.startswith("study-"):
+            fmt = fmt[len("study-"):]
+            groups = [g for g in (series_list or [])
+                      if isinstance(g, dict) and g.get("series")]
+            series_list = [s for g in groups for s in g["series"]]
         if not series_list or fmt not in (
             "dicom", "mp4", "csv", "anon-dicom"
         ):
@@ -8413,52 +8422,18 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            if fmt == "dicom":
-                written = exporter.export_dicom(
-                    series_list, out_dir, cfg.fields, progress=_cb
-                )
-            elif fmt == "anon-dicom":
-                # De-identified copy using the active anonymization profile
-                # (same tags the Anonymize toggle blanks on screen).
-                written = exporter.export_anon_dicom(
-                    series_list, out_dir, cfg.fields, progress=_cb
-                )
-            elif fmt == "csv":
-                # Each series' CSV lists the overlay tags chosen for ITS own
-                # modality (the selection differs per modality), matching the
-                # tags actually shown on that series.
-                per_series_idents = [
-                    list(self._tag_keywords_by_modality.get(
-                        self._series_modality_key(s), []))
-                    for s in series_list
-                ]
-                written = exporter.export_csv(
-                    series_list, out_dir, cfg.fields, per_series_idents,
-                    anonymized=self._anon, progress=_cb,
-                )
+            if groups is not None:
+                written = []
+                for g in groups:
+                    sub = exporter.study_folder(out_dir, g["series"],
+                                                g.get("kind", ""),
+                                                anon=(fmt == "anon-dicom"))
+                    written += self._export_run(
+                        fmt, g["series"], sub, cfg, _cb,
+                        use_display_transform)
             else:
-                # Per-series Play range (from the seek-bar markers), aligned
-                # with series_list; None = export every frame.
-                frame_ranges = [
-                    self._mp4_ranges.get(s.series_uid) for s in series_list
-                ]
-                # Image right-click → bake each series' on-screen state
-                # (orientation + free rotation + W/L) so it exports as shown.
-                # Studies-list export leaves this None → original image.
-                transforms = (
-                    [self._display_transform_for_uid(s.series_uid)
-                     for s in series_list]
-                    if use_display_transform else None
-                )
-                written = exporter.export_mp4(
-                    series_list, out_dir, cfg.fields,
-                    bitrate_mbps=cfg.bitrate_mbps,
-                    fps_override=cfg.fps,
-                    crf=cfg.crf,
-                    frame_ranges=frame_ranges,
-                    transforms=transforms,
-                    progress=_cb,
-                )
+                written = self._export_run(fmt, series_list, out_dir, cfg,
+                                           _cb, use_display_transform)
         except RuntimeError as e:
             if cancelled["yes"]:
                 self.statusBar().showMessage(t("Export cancelled."))
@@ -8473,11 +8448,67 @@ class MainWindow(QMainWindow):
             return
         prog.close()
         n = len(written)
-        if fmt in ("dicom", "anon-dicom"):
+        if groups is not None:
+            msg = t("Exported {n} study folder(s) to {dir}", n=len(groups),
+                    dir=out_dir)
+        elif fmt in ("dicom", "anon-dicom"):
             msg = t("Exported {n} folder(s) to {dir}", n=n, dir=out_dir)
         else:
             msg = t("Exported {n} file(s) to {dir}", n=n, dir=out_dir)
         self.statusBar().showMessage(msg)
+
+    def _export_run(self, fmt, series_list, out_dir, cfg, _cb,
+                    use_display_transform) -> list:
+        """One export call (DICOM / Anon DICOM / CSV / MP4) of *series_list*
+        into *out_dir*; returns what was written."""
+        from multi_dicomviewer.core import export as exporter
+        if fmt == "dicom":
+            written = exporter.export_dicom(
+                series_list, out_dir, cfg.fields, progress=_cb
+            )
+        elif fmt == "anon-dicom":
+            # De-identified copy using the active anonymization profile
+            # (same tags the Anonymize toggle blanks on screen).
+            written = exporter.export_anon_dicom(
+                series_list, out_dir, cfg.fields, progress=_cb
+            )
+        elif fmt == "csv":
+            # Each series' CSV lists the overlay tags chosen for ITS own
+            # modality (the selection differs per modality), matching the
+            # tags actually shown on that series.
+            per_series_idents = [
+                list(self._tag_keywords_by_modality.get(
+                    self._series_modality_key(s), []))
+                for s in series_list
+            ]
+            written = exporter.export_csv(
+                series_list, out_dir, cfg.fields, per_series_idents,
+                anonymized=self._anon, progress=_cb,
+            )
+        else:
+            # Per-series Play range (from the seek-bar markers), aligned
+            # with series_list; None = export every frame.
+            frame_ranges = [
+                self._mp4_ranges.get(s.series_uid) for s in series_list
+            ]
+            # Image right-click → bake each series' on-screen state
+            # (orientation + free rotation + W/L) so it exports as shown.
+            # Studies-list export leaves this None → original image.
+            transforms = (
+                [self._display_transform_for_uid(s.series_uid)
+                 for s in series_list]
+                if use_display_transform else None
+            )
+            written = exporter.export_mp4(
+                series_list, out_dir, cfg.fields,
+                bitrate_mbps=cfg.bitrate_mbps,
+                fps_override=cfg.fps,
+                crf=cfg.crf,
+                frame_ranges=frame_ranges,
+                transforms=transforms,
+                progress=_cb,
+            )
+        return written
 
     def _delete_node(self, kind: str, key: str, label: str) -> None:
         """Right-click ▸ delete: drop a patient/study/series from the list
