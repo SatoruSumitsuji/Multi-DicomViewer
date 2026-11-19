@@ -3726,6 +3726,34 @@ class CPRMixin:
         out[~inb] = -1000.0
         return out
 
+    def _cpr_display_rgb(self, hu, key):
+        """HU → the RGB the CT pane *key* shows while the HU colour map is ON
+        (its bands over that pane's window / level), uint8 (..., 3). None
+        while the colour map is off (MultiReg then windows the HU itself)."""
+        if not getattr(self, "_color", False):
+            return None
+        import sys
+        mod = sys.modules.get(type(self).__module__)
+        try:
+            win, lvl = self._wl_of(key)
+        except Exception:                                # noqa: BLE001
+            win, lvl = float(self._win), float(self._lvl)
+        f = getattr(mod, "_band_lut_rgb", None)
+        if f is not None:
+            lut = np.asarray(f(self._bands, self._opacity, win, lvl), float)
+        else:
+            g = getattr(mod, "_band_lut_array", None)
+            if g is None:
+                return None
+            lut = np.asarray(g(self._bands, self._opacity, win, lvl),
+                             float)[:, :3]
+        lo = float(getattr(mod, "_HU_LO", -1000.0))
+        hi = float(getattr(mod, "_HU_HI", 2000.0))
+        n = len(lut)
+        idx = np.clip(np.rint((np.asarray(hu, float) - lo) / (hi - lo)
+                              * (n - 1)), 0, n - 1).astype(np.intp)
+        return np.clip(np.rint(lut[idx] * 255.0), 0, 255).astype(np.uint8)
+
     def cpr_cosync_spec(self, px: int = 96):
         """Render the short-axis stack as a synthetic 'pull-back' for CoSync.
 
@@ -3740,12 +3768,27 @@ class CPRMixin:
             return None
         half = float(c["half"])
         n = int(c["cl"].n)
+        # The zoom / pan of the short-axis pane as shown (user 2026-11-19):
+        # the square the pane surely shows (its shorter side), centred where
+        # the view is panned to. The pan is along the ROTATED display axes;
+        # the stack below is in the un-rotated frame (MultiReg applies the
+        # rotation itself, about the image centre) → rotate the pan back.
+        pu = pv = 0.0
+        try:
+            pu, pv, hv = self._cpr_view_window()
+            if hv > 0:
+                half = float(hv)
+        except Exception:                                # noqa: BLE001
+            pu = pv = 0.0
+        th = math.radians(float(c.get("rot", 0.0)))
+        cu = pu * math.cos(th) - pv * math.sin(th)
+        cv = pu * math.sin(th) + pv * math.cos(th)
         # Match the CT pane's on-screen orientation: u runs left->right (columns
         # -half->+half); v runs bottom->top in the VTK pane, so as image ROWS
         # (top-down in a QImage) it must go +half->-half — otherwise the CoSync
         # image comes out flipped vs the pane.
-        gs_u = np.linspace(-half, half, px)
-        gs_v = np.linspace(half, -half, px)
+        gs_u = np.linspace(-half, half, px) + cu
+        gs_v = np.linspace(half, -half, px) + cv
         gu, gv = np.meshgrid(gs_u, gs_v)
         # Bake the Rt90/Flip (T) orientation into the stack, but NOT the
         # continuous rotation — that is carried as the CoSync free-rotation
@@ -3763,13 +3806,21 @@ class CPRMixin:
             frames[i] = self._sample_vol_grid(P)
         if c.get("reversed"):                     # distal->proximal, like IVUS
             frames = frames[::-1].copy()
+        # As shown on screen before MultiReg (user 2026-11-19): the short-axis
+        # pane's own window / level, and in colour while the HU colour map is on.
+        try:
+            win, lvl = self._wl_of("A")
+        except Exception:                                # noqa: BLE001
+            win, lvl = float(self._win), float(self._lvl)
+        rgb = self._cpr_display_rgb(frames, "A")
         return {
             "kind": "ct_cpr",
             "reversed": bool(c.get("reversed")),
             "link_id": id(self),                  # pairs it with its guide pane
-            "frames": frames,
-            "window": float(self._win),
-            "level": float(self._lvl),
+            "frames": frames if rgb is None else rgb,
+            "color": rgb is not None,
+            "window": float(win),
+            "level": float(lvl),
             "spacing_mm": (2.0 * half) / max(1, px - 1),
             "start": self._cpr_disp(c["idx"]),
             "rotation": float(c.get("rot", 0.0)),
@@ -3829,9 +3880,11 @@ class CPRMixin:
             ww, wl = self._wl_of(key)
         except Exception:                                # noqa: BLE001
             ww, wl = float(self._win), float(self._lvl)
+        rgb = self._cpr_display_rgb(img, key)
         return {
             "kind": "ct_guide",
-            "image": img.astype(np.float32),
+            "image": img.astype(np.float32) if rgb is None else rgb,
+            "color": rgb is not None,
             "window": float(ww), "level": float(wl),
             "curve": curve,
             "spacing_mm": pxmm,

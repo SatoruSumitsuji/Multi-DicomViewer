@@ -16814,6 +16814,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         o = self._pc[which]
         return o + float(wx) * u + float(wy) * v
 
+    def _cpr_view_window(self):
+        """Short-axis pane A as shown: (pan u, pan v (mm, along the displayed
+        u / v), half size (mm) of the square its shorter side shows)."""
+        p = self.pane["A"]
+        cam = p.ren.GetActiveCamera()
+        fx, fy, _fz = cam.GetFocalPoint()
+        ps = max(1e-3, float(cam.GetParallelScale()))
+        w = max(1, p.canvas.width())
+        h = max(1, p.canvas.height())
+        return float(fx), float(fy), ps * min(w, h) / h
+
     def _cpr_guide_view(self, key):
         """The map pane *key* as shown: (focal 3-D point, screen-right,
         screen-up (3-D unit vectors), half width, half height in mm) — for

@@ -288,11 +288,13 @@ class _CoregPane:
         angio-like still whose guide is the short-axis centreline itself."""
         self.series = None
         self.plane = None
-        self._stack = np.asarray(spec["image"], np.float32)[None]
+        self.is_color = bool(spec.get("color"))   # the CT colour map, as shown
+        self._stack = (np.asarray(spec["image"], np.uint8)[None]
+                       if self.is_color
+                       else np.asarray(spec["image"], np.float32)[None])
         self.total = 1
         self.window = float(spec.get("window") or 1.0)
         self.level = float(spec.get("level") or 0.0)
-        self.is_color = False
         self.is_ivus = False
         self.canvas.spacing_mm = spec.get("spacing_mm")
         self.master_radio.setVisible(False)
@@ -321,7 +323,8 @@ class _CoregPane:
         self.total = int(len(self._stack))
         self.window = float(spec.get("window") or 1.0)
         self.level = float(spec.get("level") or 0.0)
-        self.is_color = False
+        # RGB frames = the CT HU colour map was on: shown as it was on screen
+        self.is_color = bool(spec.get("color"))
         self.is_ivus = True                       # a master/driver like IVUS
         self.canvas.spacing_mm = spec.get("spacing_mm")
         self.master_radio.setVisible(True)

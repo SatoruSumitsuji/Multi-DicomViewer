@@ -6098,6 +6098,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p.cam.width = 2.0 * ps * (pw / ph)
         p.cam.depth_range = (0.1, 4.0 * self._cam_off + self._diag)
 
+    def _cpr_view_window(self):
+        """Short-axis pane A as shown: (pan u, pan v (mm, along the displayed
+        u / v), half size (mm) of the square its shorter side shows)."""
+        p = self.pane["A"]
+        pu, pv = self._cpr_view_pan()
+        s = max(1e-6, float(self._cpr_section_scale()))
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        return pu, pv, min(pw, ph) / (2.0 * s)
+
     def _cpr_guide_view(self, key):
         """The map pane *key* as shown: (focal 3-D point, screen-right,
         screen-up, half width, half height in mm) — for the MultiReg guide

@@ -215,6 +215,8 @@
   "MV面を自動設定しました（半径 {r:.1f} mm）が、心尖部は検出できませんでした。交点を心尖部に合わせて Apex Set で設定してください。": "The MV plane was set automatically (radius {r:.1f} mm), but the apex could not be detected. Move the crossing onto the apex and press Apex Set.",
   "MV面（半径 {r:.1f} mm）と心尖部（MV 中心から {d:.0f} mm、壁厚 {w:.1f} mm）を自動設定しました。確認して、ずれていれば MV は MV Draw → MV Set、心尖部は交点を合わせて Apex Set で修正してください。": "The MV plane (radius {r:.1f} mm) and the apex ({d:.0f} mm from the MV centre, wall {w:.1f} mm) were set automatically. Check them; if they are off, correct the MV with MV Draw → MV Set and the apex by moving the crossing there and pressing Apex Set.",
   "Multi-DicomViewer の設定ファイルではありません。": "Not a Multi-DicomViewer settings file.",
+  "MultiReg に CT 短軸を入れるとき、CT の長軸像（MPR / Slab MIP）もガイドペインとして追加します（中心線が自動でガイドになります）": "When a CT short-axis joins MultiReg, also add the CT long-axis view (MPR / slab MIP) as a guide pane (the centreline becomes its guide automatically)",
+  "MultiReg: CT 長軸もガイドとして追加": "MultiReg: also add the CT long-axis as a guide",
   "Next の保存先フォルダ（クリックで変更）": "Folder Next saves to (click to change)",
   "No Epi surface — press 'Epi読み込み' to load an EpiLv.json (or trace Epi in the Epi sub-mode) first.": "No Epi surface — press 'Load Epi' to load an EpiLv.json (or trace Epi in the Epi sub-mode) first.",
   "Number of radial directions used by the 放射 method. Higher = finer angular detail, a little slower.": "Number of radial directions used by the Radial method. Higher = finer angular detail, a little slower.",

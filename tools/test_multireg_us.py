@@ -176,6 +176,68 @@ check("CT short-axis reversed → the marker stays on the same section",
                   cv_[C2.total - 1 - C2.cur]),
       (C2.cur, G.canvas.coreg_marker_pt))
 
+# ---- as on screen (user 2026-11-19): the short-axis pane's own W/L, and the
+# HU colour map in colour when it is on ------------------------------------
+v._wl["A"] = [600.0, 150.0]
+sp_g = v.cpr_cosync_spec()
+check("short-axis spec takes pane A's window / level (as shown)",
+      (sp_g["window"], sp_g["level"]) == (600.0, 150.0)
+      and not sp_g["color"], (sp_g["window"], sp_g["level"]))
+v._color = True
+sp_c = v.cpr_cosync_spec()
+fr_c = np.asarray(sp_c["frames"])
+check("colour map on → the short-axis goes to MultiReg in colour (RGB)",
+      sp_c["color"] and fr_c.dtype == np.uint8 and fr_c.ndim == 4
+      and fr_c.shape[-1] == 3
+      and int(np.abs(fr_c[..., 0].astype(int)
+                     - fr_c[..., 2].astype(int)).max()) > 0,
+      (fr_c.shape, fr_c.dtype))
+g_c = v.cpr_cosync_guide_spec()
+check("colour map on → the long-axis guide (option) in colour too",
+      g_c is not None and g_c["color"]
+      and np.asarray(g_c["image"]).shape[-1] == 3)
+w3 = CoregWindow([(us, 0, 0, 0.0, False), sp_c, g_c])
+app.processEvents()
+P3, G3 = w3.panes[1], w3.panes[2]
+d3 = P3._display_frame(P3.cur)
+check("MultiReg shows the CT short-axis / long-axis as coloured",
+      P3.is_color and G3.is_color and d3.ndim == 3 and d3.shape[-1] == 3,
+      (P3.is_color, G3.is_color, d3.shape))
+v._color = False
+# zoom / pan / rotation of the short-axis pane as shown (user 2026-11-19)
+import math as _m  # noqa: E402
+c_ = v._cpr
+camA = v.pane["A"].ren.GetActiveCamera()
+_f0, _p0 = camA.GetFocalPoint(), camA.GetParallelScale()
+camA.SetParallelScale(float(c_["half"]) / 2.0)          # zoomed in ×2
+camA.SetFocalPoint(1.2, -0.8, _f0[2])                    # panned
+v.set_cpr_rotation(30.0, silent=True)
+sp_z = v.cpr_cosync_spec(px=97)
+k_ = sp_z["start"]
+i_ = (c_["cl"].n - 1 - k_) if c_.get("reversed") else k_
+o_ = np.asarray(c_["cl"].points[i_], float)
+want = float(v._sample_vol_grid((o_ + 1.2 * c_["u"][i_]
+                                 - 0.8 * c_["v"][i_])[None, None, :])[0, 0])
+got = float(np.asarray(sp_z["frames"])[k_, 48, 48])
+cvw = v.pane["A"].canvas
+hv = (float(c_["half"]) / 2.0) * min(cvw.width(), cvw.height()) \
+    / max(1, cvw.height())
+check("MultiReg short-axis = the pane's zoom + pan (centre = the panned "
+      "point, field = the shown square), rotation carried separately",
+      abs(got - want) < 1e-3
+      and abs(sp_z["spacing_mm"] - 2 * hv / 96) < 1e-6
+      and abs(sp_z["rotation"] - 30.0) < 1e-9,
+      (round(got, 2), round(want, 2), sp_z["spacing_mm"], 2 * hv / 96))
+v.set_cpr_rotation(0.0, silent=True)
+camA.SetParallelScale(_p0)
+camA.SetFocalPoint(*_f0)
+mw_src = (ROOT / "multi_dicomviewer" / "ui" / "main_window.py").read_text(
+    encoding="utf-8")
+check("the CT long-axis guide is an option (Tools menu, off by default)",
+      "multireg_ct_long_axis" in mw_src
+      and "if long_on and hasattr(v, \"cpr_cosync_guide_spec\")" in mw_src
+      and 'load_ui_state("multireg_ct_long_axis", False)' in mw_src)
+
 # SyncCT: the 2-CT link's visible name
 import inspect  # noqa: E402
 from multi_dicomviewer.ui import main_window as _mwm  # noqa: E402

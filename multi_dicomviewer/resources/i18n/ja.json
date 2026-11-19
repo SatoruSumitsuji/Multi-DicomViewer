@@ -774,6 +774,8 @@
   "MultiReg / MultiSync (*.json *.txt);;All files (*)": "MultiReg / MultiSync (*.json *.txt);;すべてのファイル (*)",
   "MultiReg file (*.multireg.json)": "MultiRegファイル (*.multireg.json)",
   "MultiReg points": "MultiReg点",
+  "MultiReg に CT 短軸を入れるとき、CT の長軸像（MPR / Slab MIP）もガイドペインとして追加します（中心線が自動でガイドになります）": "MultiReg に CT 短軸を入れるとき、CT の長軸像（MPR / Slab MIP）もガイドペインとして追加します（中心線が自動でガイドになります）",
+  "MultiReg: CT 長軸もガイドとして追加": "MultiReg: CT 長軸もガイドとして追加",
   "MultiReg…": "MultiReg…",
   "MultiSync": "MultiSync",
   "MultiSync IVUS viewer…": "MultiSync IVUSビューア…",

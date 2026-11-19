@@ -1633,6 +1633,24 @@ class MainWindow(QMainWindow):
         ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
+        # Option (user 2026-11-19): MultiReg normally takes the images as they
+        # are on screen; this ALSO adds the CT long-axis view as a guide pane
+        # whose guide = the CPR centreline (no tracing / no MultiReg points).
+        self._coreg_ct_long_act = QAction(
+            t("MultiReg: CT 長軸もガイドとして追加"), self)
+        self._coreg_ct_long_act.setCheckable(True)
+        try:
+            self._coreg_ct_long_act.setChecked(bool(
+                settings.load_ui_state("multireg_ct_long_axis", False)))
+        except Exception:                                # noqa: BLE001
+            pass
+        self._coreg_ct_long_act.setToolTip(t(
+            "MultiReg に CT 短軸を入れるとき、CT の長軸像（MPR / Slab MIP）も"
+            "ガイドペインとして追加します（中心線が自動でガイドになります）"))
+        self._coreg_ct_long_act.toggled.connect(
+            lambda on: settings.save_ui_state("multireg_ct_long_axis",
+                                              bool(on)))
+        tm.addAction(self._coreg_ct_long_act)
         # Cal-Measure (user 2026-11-18): calibrate first (2 points / catheter /
         # DICOM), then distance / polyline length / FWHM diameter — kept apart
         # from the ordinary Measure (which trusts the DICOM pixel size).
@@ -1923,10 +1941,14 @@ class MainWindow(QMainWindow):
                 if spec is not None:
                     specs.append(spec)
                     cells.append(cell)
-                    # + its long-axis view (MPR / slab MIP as shown) with the
-                    # centreline as an automatic guide (user 2026-11-19)
+                    # + (option) its long-axis view (MPR / slab MIP as shown)
+                    # with the centreline as an automatic guide. Off by
+                    # default: MultiReg takes the images as on screen.
+                    long_on = bool(getattr(self, "_coreg_ct_long_act", None)
+                                   and self._coreg_ct_long_act.isChecked())
                     g = (v.cpr_cosync_guide_spec()
-                         if hasattr(v, "cpr_cosync_guide_spec") else None)
+                         if long_on and hasattr(v, "cpr_cosync_guide_spec")
+                         else None)
                     if g is not None:
                         specs.append(g)
                         cells.append(cell)
