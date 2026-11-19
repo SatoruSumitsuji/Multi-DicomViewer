@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import dicom_io
 from multi_dicomviewer.core.anonymize import ANON_PLACEHOLDER
-from multi_dicomviewer.core.study_model import Modality, Patient, Series
+from multi_dicomviewer.core.study_model import Patient, Series
 from multi_dicomviewer.i18n import t
 
 _ROLE = Qt.ItemDataRole.UserRole
@@ -833,9 +833,9 @@ class StudyBrowser(QTreeWidget):
 
     def _study_export_groups(self, su: str, sk: str) -> list[dict]:
         """検査ごとの書き出し: every selected study node (the right-clicked
-        one when none) of an XA / IVUS-OCT-OFDI kind → [{kind, series,
-        hidden}] — its un-hidden series in display order (the greyed,
-        Hidden series are left out). CT / UCG etc. are not offered."""
+        one when none), of ANY modality (XA / IVUS-OCT-OFDI / US / CT …,
+        user 2026-11-19) → [{kind, series, hidden}] — its un-hidden series
+        in display order (the greyed, Hidden series are left out)."""
         nodes, seen = [], set()
         for it in self.selectedItems():
             idk = it.data(0, _ID_ROLE)
@@ -847,10 +847,7 @@ class StudyBrowser(QTreeWidget):
         out = []
         for u, k in nodes:
             ser = self.series_in_study(u, k)
-            if not ser or not all(
-                    getattr(s, "modality", None) in (Modality.XA,
-                                                     Modality.IVUS)
-                    for s in ser):
+            if not ser:
                 continue
             keep = [s for s in ser if not getattr(s, "hidden", False)]
             if keep:
@@ -957,8 +954,8 @@ class StudyBrowser(QTreeWidget):
         menu.addSeparator()
         if kind == "study":
             su, sk_ = idk[1], idk[2]
-            # 検査ごとの書き出し (XA / IVUS-OCT-OFDI): every series of the study
-            # in ONE export, a folder per study (user 2026-11-19)
+            # 検査ごとの書き出し (every modality): every series of the study in
+            # ONE export, a folder per study (user 2026-11-19)
             groups = self._study_export_groups(su, sk_)
             if groups:
                 n_ser = sum(len(g["series"]) for g in groups)

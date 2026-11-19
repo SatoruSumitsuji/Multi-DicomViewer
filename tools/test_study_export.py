@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""検査ごとの書き出し (user 2026-11-19): right-click a STUDY node of an XA or
-IVUS / OCT / OFDI kind → Export study (DICOM / Anon DICOM / MP4 / CSV): every
-un-hidden series of the study in one export, one folder per study
-(<date>_<kind>_study, no patient name in it). CT and UCG (US) study nodes
-do not offer it (CT stays per series; UCG is exported per series).
+"""検査ごとの書き出し (user 2026-11-19): right-click a STUDY node of ANY
+modality (XA / IVUS-OCT-OFDI / US / CT …) → Export study (DICOM / Anon DICOM
+/ MP4 / CSV): every un-hidden series of the study in one export, one folder
+per study (<date>_<kind>_study, no patient name in it).
 
 Synthetic DICOM files only (a made-up patient); dialogs / menus mocked.
 
@@ -139,10 +138,12 @@ check("… alongside Select / Show / Close / Delete",
       and any(x.startswith(t("Close (close list)")) for x in txt))
 check("IVUS-like (OCT) study: offered",
       any(a.text().startswith(want[0]) for a in menu_texts(st_oct)))
-check("CT study: not offered (stays per series)",
-      not any(a.text().startswith(want[0]) for a in menu_texts(st_ct)))
-check("UCG (US) study: not offered (per series)",
-      not any(a.text().startswith(want[0]) for a in menu_texts(st_us)))
+check("CT study: offered too",
+      all(any(a.text().startswith(w) for a in menu_texts(st_ct))
+          for w in want))
+check("US study (IVUS stored as US / UCG): offered too",
+      all(any(a.text().startswith(w) for a in menu_texts(st_us))
+          for w in want))
 got = []
 tree.export_requested.connect(lambda f, g: got.append((f, g)))
 acts = menu_texts(st_xa)
@@ -201,6 +202,18 @@ check("two studies → two study folders",
 OUT3 = tempfile.mkdtemp(dir=HOME)
 QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: OUT3)
 mw._on_export_requested("dicom", xa_ser[:1])
+OUT4 = tempfile.mkdtemp(dir=HOME)
+QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: OUT4)
+for uid, kind_ in ((st_us, "US"), (st_ct, "CT")):
+    ser_ = tree.series_in_study(*[(u, k) for (u, k) in tree._study_items
+                                  if u == uid][0])
+    mw._on_export_requested("study-anon-dicom",
+                            [{"kind": kind_, "series": ser_, "hidden": 0}])
+check("US and CT studies export as study folders too",
+      sorted(os.listdir(OUT4)) == ["20250102_CT_study_anon",
+                                   "20250102_US_study_anon"],
+      sorted(os.listdir(OUT4)))
+QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: OUT3)
 check("per-series Export (DICOM) unchanged (series folder directly)",
       len(os.listdir(OUT3)) == 1
       and not os.listdir(OUT3)[0].endswith("_study"), os.listdir(OUT3))
