@@ -2670,6 +2670,27 @@ class CPRMixin:
         k = self._cpr_at_ctrl()
         return k is not None and k == len(m["pts3d"]) - 1
 
+    def _cpr_center_preview(self, P):
+        """Right-click on the distal edit point's section (user 2026-11-19):
+        the yellow edit-point marker jumps to the clicked spot *P* at once,
+        so it is clear where 「ここを中心に Auto-Track」 will start. Returns a
+        restore callable (the menu decides what really happens: Auto-Track
+        moves it there for good with its own undo step; anything else puts
+        it back), or None."""
+        p3 = self._cpr_ctrl_pts3d()
+        if not p3:
+            return None
+        keep = p3[-1]
+        p3[-1] = np.asarray(P, float)
+        self._cpr_ctrl_markers_redraw()
+
+        def _restore():
+            q = self._cpr_ctrl_pts3d()
+            if q is p3 and q:
+                q[-1] = keep
+                self._cpr_ctrl_markers_redraw()
+        return _restore
+
     def _cpr_autotrack_from_section(self, P) -> dict | None:
         """「ここを中心に Auto-Track」: move the distal edit point to *P* (the
         clicked spot on its short-axis section — one undo step) and run

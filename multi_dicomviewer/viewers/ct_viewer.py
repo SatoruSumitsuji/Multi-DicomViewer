@@ -21577,6 +21577,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 return True
         return False
 
+    def _cpr_ctrl_markers_redraw(self):
+        """Redraw the short-axis edit-point markers + the map-pane trace."""
+        self._draw_cpr_ctrl_markers()
+        self.pane["A"].render()
+        if self._cpr is not None:
+            self._redraw_meas(self._cpr["src"])
+
     def _cpr_drag_move(self, sx, sy):
         """Move the grabbed control point IN the cross-section plane (its along-
         vessel position is preserved); the trace on the map pane follows live."""
@@ -21621,7 +21628,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a_del = menu.addAction(t("Delete Point") if on_pt
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)
+        restore = None
+        if a_at is not None:              # yellow marker → the clicked spot
+            o, u, vv, _n = self._cpr_frame()
+            du, dv = self._disp_to_world("A", sx, sy)
+            restore = self._cpr_center_preview(o + du * u + dv * vv)
         act = menu.exec(QCursor.pos())
+        if restore is not None:
+            restore()                     # the chosen action decides
         if a_at is not None and act is a_at:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._disp_to_world("A", sx, sy)
