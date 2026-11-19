@@ -556,6 +556,13 @@ class CoronaryTreeWindow(SnapDock):
         self._fix_edit.setMaximumWidth(160)
         self._fix_edit.textEdited.connect(self._on_fix_edited)
         fix_row.addWidget(self._fix_edit)
+        # Open Folder: the folder holding the listed CPR lines' .cpr.json files
+        # in Explorer / Finder, one click (user 2026-11-19)
+        self._open_folder_btn = QPushButton(t("Open Folder"))
+        self._open_folder_btn.setToolTip(t(
+            "一覧の CPR 線のファイル（.cpr.json）が入っているフォルダを開きます"))
+        self._open_folder_btn.clicked.connect(self._open_cpr_folder)
+        fix_row.addWidget(self._open_folder_btn)
         fix_row.addStretch(1)
         outer.addLayout(fix_row)
         self._last_batch = None              # undo record of the last 一括AutoTrace
@@ -1541,6 +1548,39 @@ class CoronaryTreeWindow(SnapDock):
             ed.blockSignals(True)
             ed.setText(fx)
             ed.blockSignals(False)
+
+    def _cpr_folder(self) -> str:
+        """The folder of the CPR line files shown in the list: the selected
+        line's file first, else any listed line's, else the last saved."""
+        import os
+        b = self._bundle()
+        paths = b.get("paths") or {}
+        cand = []
+        try:
+            vid = self.selected_vid()
+        except Exception:                                # noqa: BLE001
+            vid = None
+        if vid and paths.get(vid):
+            cand.append(paths[vid])
+        cand += [p for k, p in paths.items()
+                 if p and k in self._tree.vessels]
+        cand += [p for p in paths.values() if p]
+        if b.get("last_path"):
+            cand.append(b["last_path"])
+        for p in cand:
+            d = os.path.dirname(os.path.abspath(p))
+            if os.path.isdir(d):
+                return d
+        return ""
+
+    def _open_cpr_folder(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        d = self._cpr_folder()
+        if not d:
+            self._warn(t("CPR 線のファイルがまだありません（保存すると開けます）。"))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
 
     def _on_fix_edited(self, text) -> None:
         self._tree.fix_name = (text or "").strip()

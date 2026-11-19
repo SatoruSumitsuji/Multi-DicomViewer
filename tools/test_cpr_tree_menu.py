@@ -615,6 +615,29 @@ for _ in range(5):
 check("rename: Esc → name unchanged",
       W._display_name(_b["tree"].vessels["x"]) == "LAD9")
 ctw.QInputDialog.getText = real_in
+# Open Folder (right of FixName): the listed lines' .cpr.json folder
+from PyQt6.QtGui import QDesktopServices  # noqa: E402
+_opened = []
+_real_open = QDesktopServices.openUrl
+QDesktopServices.openUrl = staticmethod(lambda u: _opened.append(u.toLocalFile()))
+_fold = tempfile.mkdtemp(prefix="mdv_of_")
+_b["paths"]["x"] = os.path.join(_fold, "LAD9.cpr.json")
+open(_b["paths"]["x"], "w").write("{}")
+dk._tree_w.setCurrentItem(_it2)
+dk._open_folder_btn.click()
+_warned = []
+dk._warn = lambda m: _warned.append(m)
+_b["paths"].clear()
+_b["last_path"] = None
+dk._open_folder_btn.click()
+QDesktopServices.openUrl = _real_open
+check("Open Folder: next to FixName, opens the folder of the line files",
+      dk._open_folder_btn.parentWidget() is dk._fix_edit.parentWidget()
+      and len(_opened) == 1
+      and os.path.normcase(os.path.normpath(_opened[0]))
+      == os.path.normcase(os.path.normpath(_fold)), _opened)
+check("Open Folder: no file yet → told, nothing opened",
+      len(_opened) == 1 and len(_warned) == 1, _warned)
 dk.hide()
 _ = QPoint
 
