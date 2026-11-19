@@ -3563,6 +3563,10 @@ class MainWindow(QMainWindow):
         if u and hasattr(w, "_use_uid"):
             w._use_uid(u)
         try:
+            w._bundle()["terr_calc"] = True  # Calc pressed: compute from now on
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
             if not w.load_full_lv(full, src_path=src):
                 return False
         except Exception:                                # noqa: BLE001

@@ -122,7 +122,7 @@ class Fake:
     def _populate(self):
         pass
 
-    def _compute_territory(self):
+    def _compute_territory(self, calc=False):
         self._territory = "computed"
 
 

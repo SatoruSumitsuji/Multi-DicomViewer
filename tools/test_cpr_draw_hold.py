@@ -30,6 +30,8 @@ from multi_dicomviewer.core import settings  # noqa: E402
 assert str(settings.SETTINGS_DIR).startswith(HOME), settings.SETTINGS_DIR
 from multi_dicomviewer.viewers.ct_viewer import CTViewer  # noqa: E402
 
+from multi_dicomviewer.i18n import t  # noqa: E402
+
 fails = []
 
 
@@ -56,8 +58,17 @@ armed_sty = v._cpr_draw_btn.styleSheet()
 
 v._set_tool("MOVE")
 check("Move picked: no hold", not v._cpr_tool_hold_on())
+v._cpr_notice_last = None
 v._set_tool_by_key("ROTATE")
 check("Rotate (key): Draw on hold", v._cpr_tool_hold_on())
+check("Rotate → notice 「CPRモードオフ / 左クリックで編集点作成なし」",
+      v._cpr_notice_last is not None and v._cpr_notice_last[0] is False
+      and v._cpr_notice_last[1] == t("CPRモードオフ\n左クリックで編集点作成なし"),
+      v._cpr_notice_last)
+v._cpr_notice_last = None
+v._set_tool("PAGING")
+check("already on hold: no second OFF notice", v._cpr_notice_last is None)
+v._set_tool("ROTATE")
 check("on hold: Draw button shows paused (dashed)",
       "dashed" in v._cpr_draw_btn.styleSheet()
       and v._cpr_draw_btn.styleSheet() != armed_sty)
@@ -130,6 +141,10 @@ v._cpr_redraw_menu()
 QMenu.exec = orig_exec
 check("right double-click → ReDraw (hold ended, Draw armed)",
       not v._cpr_tool_hold_on() and v._coronary_mpr_pending)
+check("right double-click → notice 「CPRモードオン / 左クリックで編集点作成」",
+      v._cpr_notice_last is not None and v._cpr_notice_last[0] is True
+      and v._cpr_notice_last[1] == t("CPRモードオン\n左クリックで編集点作成"),
+      v._cpr_notice_last)
 
 
 def exec_left(self, *a, **k):

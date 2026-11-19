@@ -2299,7 +2299,7 @@ class CoronaryTreeWindow(SnapDock):
                          for tg in territory_file_mod.targets(data)
                          if tg.get("vid")]
         self._populate()
-        self._compute_territory()            # engine + targets + overlay
+        self._compute_territory(calc=True)   # engine + targets + overlay
         self._bundle()["terr_base"] = self._terr_sig()
         self._hint.setText(t("Territory を読込みました: {p}",
                              p=os.path.basename(path) if path else "territory"))
@@ -2317,12 +2317,27 @@ class CoronaryTreeWindow(SnapDock):
             combo.setCurrentIndex(i)
             combo.blockSignals(False)
 
-    def _compute_territory(self) -> None:
+    def _compute_territory(self, calc: bool = False) -> None:
         """Re-entrancy guard around the actual compute. _run_busy pumps the event
         loop (QApplication.processEvents) while the busy dialog is up, which can
         deliver an event that calls _compute_territory again mid-run — re-opening
         the dialog in an endless show/hide loop (the Mac hang on a corotree +
-        FullLv drop). Coalesce to the in-flight compute instead."""
+        FullLv drop). Coalesce to the in-flight compute instead.
+
+        The Territory is computed only once the user asked for it (user
+        2026-11-19): 「Territory: Calc」 or a loaded .territory.json (*calc*
+        True) arms this CT's bundle; until then a tree edit (setting the Root
+        while building the tree) or a FullLv load leaves the result blank.
+        Once armed, tree edits keep re-assigning it as before; emptying the
+        tree disarms it again."""
+        b = self._bundle()
+        if calc:
+            b["terr_calc"] = True
+        elif not self._tree.vessels:
+            b["terr_calc"] = False
+        if not b.get("terr_calc"):
+            self._territory_blank()
+            return
         if getattr(self, "_computing_territory", False):
             return
         self._computing_territory = True
@@ -2330,6 +2345,22 @@ class CoronaryTreeWindow(SnapDock):
             self._compute_territory_impl()
         finally:
             self._computing_territory = False
+
+    def _territory_blank(self) -> None:
+        """No Territory yet (Calc not pressed): an empty result + readout."""
+        had = self._territory is not None
+        self._territory = None
+        self._myo_ml = None
+        self._terr_lbl.setText(
+            t("Territory: FullLv 未読込") if self._full_lv_data is None
+            else t("Territory: 未計算（Calc で計算）"))
+        self._terr_out.setPlainText("")
+        if had:
+            try:
+                self._populate()
+                self._push_territory()
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _compute_territory_impl(self) -> None:
         """(Re)build the TerritoryEngine from the current tree + loaded FullLv and

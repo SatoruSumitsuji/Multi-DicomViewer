@@ -42,6 +42,7 @@ class Canvas:
 class Pane:
     def __init__(self, index, ivus, total, cur):
         self.index, self.is_ivus, self.total, self.cur = index, ivus, total, cur
+        self.link_ct = None              # not a CT long-axis guide pane
         self.series = SimpleNamespace(label=f"S{index}", files=[])
         self.canvas = Canvas()
 
@@ -66,7 +67,8 @@ def make():
         _placing=False, _syncing=False)
     for name in ("_default_dir", "_remember_dir", "_save_coreg", "_load_coreg",
                  "_parse_coreg_json", "_parse_pane_frames", "_apply_loaded",
-                 "_parse_multisync_txt", "_goto_landmark"):
+                 "_parse_multisync_txt", "_goto_landmark",
+                 "_is_manual_angio"):
         fn = W.__dict__[name]
         setattr(o, name, fn.__func__ if isinstance(fn, staticmethod)
                 else fn.__get__(o))

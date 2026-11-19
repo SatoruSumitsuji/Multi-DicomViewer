@@ -1078,15 +1078,81 @@ class CPRMixin:
                 and getattr(self, "_coronary_mode", False)
                 and getattr(self, "_meas_on", False)
                 and getattr(self, "_mode", "3D") == "3D"):
+            was = bool(getattr(self, "_cpr_tool_hold", False))
             self._cpr_tool_hold = True
             self._coronary_sync_ui()
+            if not was:
+                self._cpr_hold_notice(False)
 
     def _cpr_redraw(self) -> None:
         """Right-click ▸ ReDraw: end the hold — left-click draws / edits the
         CPR line again, exactly as before the hold (an armed Draw / an
         unfinished trace continues; the hold never changed them)."""
+        was = self._cpr_tool_hold_on()
         self._cpr_tool_hold = False
         self._coronary_sync_ui()
+        if was:
+            self._cpr_hold_notice(True)
+
+    _CPR_NOTICE_MS = 1800
+
+    def _cpr_hold_notice(self, on: bool) -> None:
+        """Say in the middle of both images whether a plain left-click makes
+        CPR edit points now (user 2026-11-19): OFF when Rotate / Paging takes
+        the left button, ON after a right double-click (ReDraw). Large,
+        two lines, gone after a moment. Shown as a click-through floating
+        label (a child widget would hide under the GL canvas)."""
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtWidgets import QLabel
+        text = (t("CPRモードオン\n左クリックで編集点作成") if on
+                else t("CPRモードオフ\n左クリックで編集点作成なし"))
+        self._cpr_notice_last = (bool(on), text)          # (tests)
+        for lb in getattr(self, "_cpr_notice_lbls", []) or []:
+            try:
+                lb.close()
+                lb.deleteLater()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._cpr_notice_lbls = []
+        col = "#2ecc71" if on else "#ff9f43"
+        for key in ("A", "B"):
+            try:
+                cv = self.pane[key].canvas
+            except Exception:                            # noqa: BLE001
+                continue
+            if cv is None or not cv.isVisible() or cv.width() < 40:
+                continue
+            lb = QLabel(text)
+            lb.setWindowFlags(Qt.WindowType.ToolTip
+                              | Qt.WindowType.FramelessWindowHint
+                              | Qt.WindowType.WindowStaysOnTopHint
+                              | Qt.WindowType.WindowTransparentForInput)
+            lb.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            lb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            px = max(15, min(26, int(cv.width() / 18)))
+            lb.setStyleSheet(
+                f"QLabel {{ background:rgba(20,20,20,225); color:{col};"
+                f" border:3px solid {col}; border-radius:8px;"
+                f" padding:10px 18px; font-size:{px}px; font-weight:bold; }}")
+            lb.adjustSize()
+            c = cv.mapToGlobal(cv.rect().center())
+            lb.move(c.x() - lb.width() // 2, c.y() - lb.height() // 2)
+            lb.show()
+            self._cpr_notice_lbls.append(lb)
+        lbls = list(self._cpr_notice_lbls)
+
+        def _gone():
+            for lb in lbls:
+                try:
+                    lb.close()
+                    lb.deleteLater()
+                except Exception:                        # noqa: BLE001
+                    pass
+            if getattr(self, "_cpr_notice_lbls", None) == lbls:
+                self._cpr_notice_lbls = []
+        if lbls:
+            QTimer.singleShot(self._CPR_NOTICE_MS, _gone)
 
     def _cpr_redraw_menu(self) -> bool:
         """Right-click while on hold → a menu with 「ReDraw」. True = shown.
