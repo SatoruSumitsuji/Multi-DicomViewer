@@ -3674,6 +3674,8 @@ class CPRMixin:
             frames = frames[::-1].copy()
         return {
             "kind": "ct_cpr",
+            "reversed": bool(c.get("reversed")),
+            "link_id": id(self),                  # pairs it with its guide pane
             "frames": frames,
             "window": float(self._win),
             "level": float(self._lvl),
@@ -3681,6 +3683,71 @@ class CPRMixin:
             "start": self._cpr_disp(c["idx"]),
             "rotation": float(c.get("rot", 0.0)),
             "label": t("CT short-axis"),
+        }
+
+    def cpr_cosync_guide_spec(self, px: int = 512):
+        """The CT long-axis view (the line's map pane — MPR / slab MIP, as it
+        is oriented on screen) as an angio-like GUIDE pane for MultiReg (user
+        2026-11-19): a still image with this short-axis' 3-D centreline
+        projected onto it as the guide, one curve point per centreline index.
+        MultiReg then puts the marker at the short-axis position directly —
+        no tracing and no MultiReg points needed between the two.
+        None when the short-axis isn't active or the map pane is a VR."""
+        c = self._cpr
+        if c is None or self._vol is None:
+            return None
+        key = c.get("src") if c.get("src") in ("A", "B") else "B"
+        if getattr(self, "_vr_on", {}).get(key):
+            return None
+        try:
+            focal, ur, vr, hw, hh = self._cpr_guide_view(key)
+        except Exception:                                # noqa: BLE001
+            return None
+        n3 = np.asarray(self._axes_for(key)[2], float)
+        pts = np.asarray(c["cl"].points, float)
+        d = pts - focal
+        xs, ys = d @ ur, d @ vr
+        # the on-screen framing, widened to hold the whole centreline
+        m = 5.0
+        x0 = min(-hw, float(xs.min()) - m)
+        x1 = max(hw, float(xs.max()) + m)
+        y0 = min(-hh, float(ys.min()) - m)
+        y1 = max(hh, float(ys.max()) + m)
+        pxmm = max(x1 - x0, y1 - y0) / float(px)
+        W = max(8, int(np.ceil((x1 - x0) / pxmm)))
+        H = max(8, int(np.ceil((y1 - y0) / pxmm)))
+        gx = x0 + (np.arange(W) + 0.5) * pxmm
+        gy = y1 - (np.arange(H) + 0.5) * pxmm            # row 0 = top
+        GX, GY = np.meshgrid(gx, gy)
+        P = (focal[None, None, :] + GX[..., None] * ur[None, None, :]
+             + GY[..., None] * vr[None, None, :])
+        th = float(getattr(self, "_thick", {}).get(key, 0.0) or 0.0)
+        if th > 0:                                       # slab MIP, as shown
+            step = max(0.3, float(min(self._dims)))
+            offs = np.linspace(-th / 2.0, th / 2.0,
+                               max(2, int(round(th / step)) + 1))
+            img = None
+            for o in offs:
+                s = self._sample_vol_grid(P + o * n3[None, None, :])
+                img = s if img is None else np.maximum(img, s)
+        else:
+            img = self._sample_vol_grid(P)
+        curve = [((float(x) - x0) / pxmm, (y1 - float(y)) / pxmm)
+                 for x, y in zip(xs, ys)]
+        try:
+            ww, wl = self._wl_of(key)
+        except Exception:                                # noqa: BLE001
+            ww, wl = float(self._win), float(self._lvl)
+        return {
+            "kind": "ct_guide",
+            "image": img.astype(np.float32),
+            "window": float(ww), "level": float(wl),
+            "curve": curve,
+            "spacing_mm": pxmm,
+            "reversed": bool(c.get("reversed")),
+            "link_id": id(self),
+            "label": (t("CT long-axis (slab MIP {th:.0f} mm)", th=th)
+                      if th > 0 else t("CT long-axis")),
         }
 
     # ==================================================================

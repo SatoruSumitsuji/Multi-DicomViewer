@@ -1371,7 +1371,7 @@ class MainWindow(QMainWindow):
         col.addWidget(_bar_scroll)
         # LV-CoSync control bar (hidden until a Diastole/Systole CT link is on).
         col.addWidget(self._build_lv_cosync_bar())
-        # SyncView control bar (hidden until SyncView is on).
+        # SyncCT control bar (hidden until SyncCT is on).
         col.addWidget(self._build_syncview_bar())
         col.addWidget(self._grid_host, 1)
         self.setCentralWidget(central)
@@ -1643,11 +1643,11 @@ class MainWindow(QMainWindow):
             "(XA, echo and other 2-D series); saved as .CalMeas.json"))
         self._calmeas_act.triggered.connect(self._open_calmeas)
         tm.addAction(self._calmeas_act)
-        self._syncview_act = QAction(t("SyncView"), self)
+        self._syncview_act = QAction(t("SyncCT"), self)
         self._syncview_act.setCheckable(True)
         self._syncview_act.setToolTip(t(
             "Compare two 3-D CTs side by side under identical manipulation: "
-            "align both views manually, then turn SyncView ON — every "
+            "align both views manually, then turn SyncCT ON — every "
             "pan / rotate / zoom / paging / W-L in one pane is mirrored to the "
             "other as the same delta (needs two CT panes shown)"
         ))
@@ -1890,7 +1890,7 @@ class MainWindow(QMainWindow):
     def _open_coreg(self) -> None:
         """Tools ▸ MultiReg — the IVUS / XA / coronary-CT co-registration window
         (CoregWindow). (The former Diastole↔Systole 2-CT branch is retired; a
-        separate SyncView tool will handle 3-D CT compare.)"""
+        separate SyncCT tool will handle 3-D CT compare.)"""
         self._open_coreg_ivus()
 
     def _open_coreg_ivus(self) -> None:
@@ -1923,9 +1923,20 @@ class MainWindow(QMainWindow):
                 if spec is not None:
                     specs.append(spec)
                     cells.append(cell)
+                    # + its long-axis view (MPR / slab MIP as shown) with the
+                    # centreline as an automatic guide (user 2026-11-19)
+                    g = (v.cpr_cosync_guide_spec()
+                         if hasattr(v, "cpr_cosync_guide_spec") else None)
+                    if g is not None:
+                        specs.append(g)
+                        cells.append(cell)
                 continue
             se = self._series_by_uid.get(pane.shown_series_uid())
-            if se is None or se.modality not in (Modality.IVUS, Modality.XA):
+            # No Modality limit (user 2026-11-19: an IVUS may be stored as
+            # "US"): XA = angio, anything else with images = a pull-back.
+            # Only a plain CT (not in short-axis, handled above) and an SR
+            # (no pixels) are left out.
+            if se is None or se.modality in (Modality.CT, Modality.SR):
                 continue
             v = pane.current_viewer()
             fr = int(getattr(v, "_frame", 0))    # keep the frame on screen now
@@ -1966,9 +1977,9 @@ class MainWindow(QMainWindow):
         self._coreg_win.showMaximized()
         self._coreg_win.raise_()
 
-    # ============================ SyncView =============================
+    # ============================ SyncCT =============================
     def _syncview_ct_viewers(self) -> list:
-        """The shown CT viewers eligible for a SyncView link (plain-MPR / 2-D
+        """The shown CT viewers eligible for a SyncCT link (plain-MPR / 2-D
         CT with an image), in reading order — at most the first two."""
         out = []
         for pane in self._shown_panes():
@@ -1987,12 +1998,12 @@ class MainWindow(QMainWindow):
         return ln
 
     def _build_syncview_bar(self):
-        """The unified SyncView toolbar, shown ONLY while SyncView is active: ONE
+        """The unified SyncCT toolbar, shown ONLY while SyncCT is active: ONE
         control set that drives BOTH panes (per-pane toolbars are hidden). Row 1 =
         view controls (Bi/Lt/Rt, CenterLine, Measure, the interaction tools, the
-        2-D transforms, Undo/Redo). Row 2 = SyncView meta (level-sync 按分/mm,
-        match-scale, End). Hidden otherwise. SyncView is view-only — no image or
-        border editing (Measure prompts to leave SyncView)."""
+        2-D transforms, Undo/Redo). Row 2 = SyncCT meta (level-sync 按分/mm,
+        match-scale, End). Hidden otherwise. SyncCT is view-only — no image or
+        border editing (Measure prompts to leave SyncCT)."""
         self._syncview_link = None
         bar = QWidget()
         outer = QVBoxLayout(bar)
@@ -2032,8 +2043,8 @@ class MainWindow(QMainWindow):
         r1.addWidget(self._sv_cl_btn)
         self._sv_meas_btn = QPushButton("📏 " + t("Measure"))
         self._sv_meas_btn.setToolTip(t(
-            "Measuring is per-pane — it needs SyncView off. Click to leave "
-            "SyncView (re-enter later via Tools ▸ SyncView)."))
+            "Measuring is per-pane — it needs SyncCT off. Click to leave "
+            "SyncCT (re-enter later via Tools ▸ SyncCT)."))
         self._sv_meas_btn.clicked.connect(self._sv_measure)
         r1.addWidget(self._sv_meas_btn)
         # Slab厚 (both panes): a display + selector to the right of Measure.
@@ -2080,8 +2091,8 @@ class MainWindow(QMainWindow):
         r1.addWidget(self._sv_redo_btn)
         r1.addStretch(1)
 
-        # ---- Row 2: SyncView meta ----
-        lbl = QLabel("🔗 " + t("SyncView"))
+        # ---- Row 2: SyncCT meta ----
+        lbl = QLabel("🔗 " + t("SyncCT"))
         f = lbl.font(); f.setBold(True); lbl.setFont(f)
         r2.addWidget(lbl)
         r2.addSpacing(10)
@@ -2108,7 +2119,7 @@ class MainWindow(QMainWindow):
             "両ペインを同じズームに合わせ直す（各自でズームした後に）"))
         self._sv_scale_btn.clicked.connect(self._sv_match_scale)
         r2.addWidget(self._sv_scale_btn)
-        self._sv_exit_btn = QPushButton(t("SyncView終了"))
+        self._sv_exit_btn = QPushButton(t("SyncCT終了"))
         self._sv_exit_btn.clicked.connect(self._stop_syncview)
         r2.addWidget(self._sv_exit_btn)
         r2.addStretch(1)
@@ -2117,7 +2128,7 @@ class MainWindow(QMainWindow):
         bar.setVisible(False)
         return bar
 
-    # ---- SyncView shared-toolbar actions (drive BOTH linked viewers) ----
+    # ---- SyncCT shared-toolbar actions (drive BOTH linked viewers) ----
     def _sv_viewers(self) -> list:
         link = getattr(self, "_syncview_link", None)
         return link.viewers() if link is not None else []
@@ -2161,11 +2172,11 @@ class MainWindow(QMainWindow):
         self._sv_action("slab", float(mm))
 
     def _sv_measure(self) -> None:
-        """Measure is per-pane → leave SyncView to measure."""
+        """Measure is per-pane → leave SyncCT to measure."""
         if QMessageBox.question(
-                self, t("SyncView"),
-                t("Measuring is per-pane and needs SyncView OFF. Exit SyncView "
-                  "to measure?  (Re-enter later via Tools ▸ SyncView.)"),
+                self, t("SyncCT"),
+                t("Measuring is per-pane and needs SyncCT OFF. Exit SyncCT "
+                  "to measure?  (Re-enter later via Tools ▸ SyncCT.)"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
         ) == QMessageBox.StandardButton.Yes:
@@ -2231,7 +2242,7 @@ class MainWindow(QMainWindow):
             b.setText(t("縮尺を合わせる"))
 
     def _toggle_syncview(self) -> None:
-        """Tools ▸ SyncView (checkable): link / unlink the two shown CTs so mouse
+        """Tools ▸ SyncCT (checkable): link / unlink the two shown CTs so mouse
         / keyboard operations in either are mirrored to the other."""
         if getattr(self, "_syncview_link", None) is not None:
             self._stop_syncview()
@@ -2240,16 +2251,16 @@ class MainWindow(QMainWindow):
         if len(viewers) < 2:
             self._syncview_act.setChecked(False)
             QMessageBox.information(
-                self, t("SyncView"),
+                self, t("SyncCT"),
                 t("Show two CT series (one per pane) first, then turn "
-                  "SyncView on."),
+                  "SyncCT on."),
             )
             return
         viewers = viewers[:2]
         # 1) Confirm starting from the CURRENT views as the initial position.
         if QMessageBox.question(
-                self, t("SyncView"),
-                t("Start SyncView with the two panes' CURRENT views as the "
+                self, t("SyncCT"),
+                t("Start SyncCT with the two panes' CURRENT views as the "
                   "initial position?"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
@@ -2264,7 +2275,7 @@ class MainWindow(QMainWindow):
             self._syncview_link.set_level_fraction(True)
         # 2) Offer the same-scale lock.
         if QMessageBox.question(
-                self, t("SyncView"),
+                self, t("SyncCT"),
                 t("Match the two CTs to the same zoom (scale) now?\n"
                   "Choose No to keep each view's current zoom."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -2282,7 +2293,7 @@ class MainWindow(QMainWindow):
                 pass
         self._syncview_active = True
         self._sv_set_tool_shortcuts(True)    # Z/V/R/S/G/T/W → shared tools
-        self._sync_xa_shortcuts()            # keep cine keys off during SyncView
+        self._sync_xa_shortcuts()            # keep cine keys off during SyncCT
         self._sv_init_bar_state(viewers[0])
         self._syncview_act.setChecked(True)
         self._syncview_bar.setVisible(True)
@@ -2292,7 +2303,7 @@ class MainWindow(QMainWindow):
 
     def _sv_init_bar_state(self, v) -> None:
         """Reflect viewer *v*'s current side / CenterLine / tool on the shared
-        bar so the toolbar matches what's on screen at SyncView start."""
+        bar so the toolbar matches what's on screen at SyncCT start."""
         try:
             side = v.current_side() if hasattr(v, "current_side") else "Bi"
         except Exception:                                # noqa: BLE001
@@ -2318,7 +2329,7 @@ class MainWindow(QMainWindow):
             self._sv_slab_spin.blockSignals(False)
 
     def _stop_syncview(self) -> None:
-        """Drop the SyncView link (from the menu toggle, the bar, or when the
+        """Drop the SyncCT link (from the menu toggle, the bar, or when the
         panes change)."""
         link = getattr(self, "_syncview_link", None)
         viewers = link.viewers() if link is not None else []
@@ -6907,7 +6918,7 @@ class MainWindow(QMainWindow):
             self._grid.removeWidget(pane)            # any 1×1 direct placement
 
     def _apply_layout(self, key: str, cells=None) -> None:
-        # A SyncView link binds two SHOWN CT panes; a re-layout can hide or
+        # A SyncCT link binds two SHOWN CT panes; a re-layout can hide or
         # rearrange them, so drop the link (the user re-enables it once the two
         # CTs are side by side again).
         if getattr(self, "_syncview_link", None) is not None:
@@ -7068,7 +7079,7 @@ class MainWindow(QMainWindow):
         self.refresh_ct_mode_bars()
 
     def _refresh_active_pane_border(self) -> None:
-        """Highlight the active pane — EXCEPT in SyncView, where operations drive
+        """Highlight the active pane — EXCEPT in SyncCT, where operations drive
         both panes so there is no single 'active' pane (the border is dropped)."""
         sync = getattr(self, "_syncview_active", False)
         for p in self._panes:
@@ -7373,12 +7384,12 @@ class MainWindow(QMainWindow):
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
             self._xa_shortcuts.append(sc)
-        # SyncView tool keys: the shared toolbar's tools need keyboard access too.
-        # App-wide QShortcuts ENABLED ONLY while SyncView is active (both panes
+        # SyncCT tool keys: the shared toolbar's tools need keyboard access too.
+        # App-wide QShortcuts ENABLED ONLY while SyncCT is active (both panes
         # are CT then, so the cine keys are disabled → no clash), routed to
         # _sv_tool so BOTH CTs switch and the shared bar updates. Disabled
         # otherwise, so each CT viewer's own keyPressEvent keeps handling
-        # Z/V/R/S/G/T/W when not in SyncView.
+        # Z/V/R/S/G/T/W when not in SyncCT.
         self._sv_tool_shortcuts = []
         for key, tool in (("Z", "ZOOM"), ("V", "MOVE"), ("R", "ROTATE"),
                           ("S", "SPIN"), ("G", "PAGING"), ("T", "THICK"),
@@ -7391,15 +7402,15 @@ class MainWindow(QMainWindow):
         self._sync_xa_shortcuts()
 
     def _sv_set_tool_shortcuts(self, on: bool) -> None:
-        """Enable the SyncView tool keys (Z/V/R/S/G/T/W → _sv_tool) only while
-        SyncView is active."""
+        """Enable the SyncCT tool keys (Z/V/R/S/G/T/W → _sv_tool) only while
+        SyncCT is active."""
         for sc in getattr(self, "_sv_tool_shortcuts", []):
             sc.setEnabled(bool(on))
 
     def _sync_xa_shortcuts(self) -> None:
         v = self._active.current_viewer()
-        # While SyncView is active the cine keys must stay OFF even if a cine pane
-        # is somehow active, so they can't collide with the SyncView tool keys
+        # While SyncCT is active the cine keys must stay OFF even if a cine pane
+        # is somehow active, so they can't collide with the SyncCT tool keys
         # (two enabled ApplicationShortcuts on one key = neither fires).
         on = _is_cine(v) and not getattr(self, "_syncview_active", False)
         for sc in getattr(self, "_xa_shortcuts", []):

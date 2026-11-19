@@ -1,0 +1,190 @@
+# -*- coding: utf-8 -*-
+"""MultiReg without angio (user 2026-11-19): an IVUS stored as Modality "US"
+and a CT short-axis are both pull-backs (no Modality judgement); two sync
+points with no XA position, then scrubbing the IVUS drives the CT
+short-axis. The CT long-axis view (MPR / slab MIP as shown) joins as an
+angio-like guide pane whose guide is the projected centreline: its marker
+follows the CT short-axis by geometry (no tracing, no MultiReg points).
+Also: the 2-CT link is named SyncCT (was SyncView).
+
+Real VTK CTViewer + CoregWindow on synthetic data (made-up patient).
+
+    python tools/test_multireg_us.py
+"""
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+HOME = tempfile.mkdtemp()
+os.environ["HOME"] = HOME
+os.environ["USERPROFILE"] = HOME
+# The VTK viewer needs a real GL context (offscreen has none on Windows);
+# nothing is shown.
+os.environ["QT_QPA_PLATFORM"] = ("windows" if sys.platform == "win32"
+                                 else os.environ.get("QT_QPA_PLATFORM", "offscreen"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import numpy as np  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+
+app = QApplication.instance() or QApplication([])
+from multi_dicomviewer.core import settings  # noqa: E402
+
+assert str(settings.SETTINGS_DIR).startswith(HOME), settings.SETTINGS_DIR
+for nm in ("information", "warning", "critical"):
+    setattr(QMessageBox, nm, staticmethod(
+        lambda *a, **k: QMessageBox.StandardButton.Ok))
+QMessageBox.question = staticmethod(
+    lambda *a, **k: QMessageBox.StandardButton.Yes)
+QMessageBox.exec = lambda self: 0
+from multi_dicomviewer.core.dicom_io import LoadedSeries  # noqa: E402
+from multi_dicomviewer.core.study_model import Modality  # noqa: E402
+from multi_dicomviewer.i18n import t  # noqa: E402
+from multi_dicomviewer.viewers import ct_viewer as ctv  # noqa: E402
+
+fails = []
+
+
+def check(name, ok, info=""):
+    print(("PASS " if ok else "FAIL ") + name, info)
+    if not ok:
+        fails.append(name)
+
+
+sx, sy, sz = 0.4, 0.4, 0.5
+nz, ny, nx = 160, 200, 200
+z, y, x = np.mgrid[0:nz, 0:ny, 0:nx].astype(np.float32)
+X, Y, Z = x * sx, y * sy, z * sz
+vol = np.full((nz, ny, nx), -80.0, np.float32)
+cen = [(10 + t, 40, 30) for t in np.arange(0, 30, 0.2)]
+cen += [(40 + 15 * np.sin(a), 40 + 15 * (1 - np.cos(a)), 30 + 6 * a)
+        for a in np.arange(0, 2.0, 0.2 / 15)]
+for c in cen:
+    r = 1.5
+    sl = (slice(int((c[2] - r - 1) / sz), int((c[2] + r + 1) / sz) + 1),
+          slice(int((c[1] - r - 1) / sy), int((c[1] + r + 1) / sy) + 1),
+          slice(int((c[0] - r - 1) / sx), int((c[0] + r + 1) / sx) + 1))
+    m = (X[sl] - c[0]) ** 2 + (Y[sl] - c[1]) ** 2 + (Z[sl] - c[2]) ** 2 <= r * r
+    vol[sl][m] = 380
+vol += np.random.default_rng(0).normal(0, 25, vol.shape).astype(np.float32)
+s = LoadedSeries(modality=Modality.CT, volume=vol.astype(np.int16), spacing_mm=(0.4, 0.4), cine_fps=None,
+                 window=800.0, level=200.0, slice_mm=0.5, patient_basis=None, series_uid="live-uid")
+v = ctv.CTViewer(); v.resize(1400, 800); v.load_series(s, "live"); v._set_mode("3D")
+app.processEvents()
+v._coronary_mode = True
+p3 = [[15.0, 40, 30], [22.0, 40, 30]]
+pts = [tuple(map(float, v._world3d_to_out("B", np.array(q)))) for q in p3]
+v._measures["B"].append({"id": 77, "type": "polyline", "pts": pts, "pts3d": p3, "color": "#ffff00"})
+mi = len(v._measures["B"]) - 1
+print("built", v._cpr_ensure_built(("B", mi)), v._cpr is not None)
+app.processEvents()
+import pydicom
+from pydicom.dataset import FileDataset, FileMetaDataset
+from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+from multi_dicomviewer.core import dicom_io
+from multi_dicomviewer.ui.coreg_window import CoregWindow
+spec_ct = v.cpr_cosync_spec()
+check("CT short-axis spec", spec_ct is not None)
+usd = tempfile.mkdtemp(dir=HOME)
+meta = FileMetaDataset(); meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.3.1"
+meta.MediaStorageSOPInstanceUID = generate_uid(); meta.TransferSyntaxUID = ExplicitVRLittleEndian
+ds = FileDataset(None, {}, file_meta=meta, preamble=bytes(1) * 128)
+ds.SOPClassUID = meta.MediaStorageSOPClassUID; ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+ds.PatientName, ds.PatientID = "TEST^US", "TESTUS"; ds.StudyInstanceUID = generate_uid(); ds.SeriesInstanceUID = generate_uid()
+ds.Modality = "US"; ds.Rows = ds.Columns = 64; ds.NumberOfFrames = 20; ds.SamplesPerPixel = 1
+ds.PhotometricInterpretation = "MONOCHROME2"; ds.BitsAllocated = ds.BitsStored = 8; ds.HighBit = 7; ds.PixelRepresentation = 0
+ds.PixelData = (np.random.default_rng(1).integers(0, 255, (20, 64, 64), dtype=np.uint8)).tobytes()
+ds.save_as(os.path.join(usd, "us.dcm"), enforce_file_format=True)
+pts_ = dicom_io.index_files([os.path.join(usd, "us.dcm")])
+us = [se for p in pts_.values() for st in p.studies.values() for se in st.series.values()][0]
+check("US series is not Modality.IVUS", us.kind == "US")
+w = CoregWindow([(us, 0, 0, 0.0, False), spec_ct]); app.processEvents()
+check("MultiReg: the US IVUS and the CT short-axis are both pull-backs (no XA)",
+      [p.is_ivus for p in w.panes] == [True, True] and w.panes[0].total == 20,
+      [(p.is_ivus, p.total) for p in w.panes])
+P_us, P_ct = w.panes
+def lm(fu, fc):
+    P_us.slider.setValue(fu); P_ct.slider.setValue(fc); app.processEvents()
+    w._add_btn.click(); app.processEvents(); w._add_btn.click(); app.processEvents()
+w._set_active_ivus(P_us.index)
+lm(2, 5); lm(15, 40)
+check("two sync points without any XA position",
+      len(w._landmarks) == 2 and all(not lm_["fracs"] for lm_ in w._landmarks),
+      [lm_["frames"] for lm_ in w._landmarks])
+P_us.slider.setValue(8); app.processEvents()
+f2 = w._landmarks[1]["frames"][1]
+exp = round(5 + (8 - 2) / 13 * (f2 - 5))
+check("scrubbing the US IVUS drives the CT short-axis (interpolated)",
+      abs(P_ct.cur - exp) <= 1, (P_ct.cur, exp))
+
+# ---- CT long-axis view as an automatic guide pane (no tracing) ------------
+v._thick["B"] = 40.0                  # slab MIP holding the whole vessel
+g = v.cpr_cosync_guide_spec()
+img = np.asarray(g["image"]) if g else None
+cv_ = np.asarray(g["curve"]) if g else np.zeros((0, 2))
+vals = [img[int(round(y)), int(round(x))] for x, y in cv_
+        if 0 <= int(round(y)) < img.shape[0]
+        and 0 <= int(round(x)) < img.shape[1]] if g else []
+check("guide spec: slab-MIP image + the centreline projected (1 pt / section)",
+      g is not None and len(cv_) == len(spec_ct["frames"])
+      and len(vals) == len(cv_) and float(np.min(vals)) > 250,
+      (img.shape if g else None, len(cv_),
+       round(float(np.min(vals))) if vals else None))
+w2 = CoregWindow([(us, 0, 0, 0.0, False), spec_ct, g])
+app.processEvents()
+G = w2.panes[2]
+check("guide pane: angio-like, linked to the CT short-axis, no Trace needed",
+      not G.is_ivus and G.link_ct == 1
+      and len(w2._guides[2]["curve"]) == len(cv_))
+w2._set_active_ivus(1)
+w2.panes[1].slider.setValue(7)
+app.processEvents()
+check("CT short-axis scrubbed → the long-axis marker is at that section",
+      G.canvas.coreg_marker_pt is not None
+      and np.allclose(G.canvas.coreg_marker_pt, cv_[7]),
+      (G.canvas.coreg_marker_pt, tuple(cv_[7])))
+U2, C2 = w2.panes[0], w2.panes[1]
+w2._set_active_ivus(0)
+for fu, fc in ((2, 3), (15, 16)):
+    U2.slider.setValue(fu)
+    C2.slider.setValue(fc)
+    app.processEvents()
+    w2._add_btn.click()
+    app.processEvents()
+    w2._add_btn.click()
+    app.processEvents()
+check("MultiReg points still commit (the guide pane takes no part)",
+      len(w2._landmarks) == 2
+      and all(not lm_["fracs"] for lm_ in w2._landmarks),
+      [lm_["frames"] for lm_ in w2._landmarks])
+U2.slider.setValue(8)
+app.processEvents()
+check("IVUS master → CT follows → the long-axis marker follows the CT",
+      np.allclose(G.canvas.coreg_marker_pt, cv_[C2.cur]),
+      (C2.cur, G.canvas.coreg_marker_pt))
+G.canvas.coreg_marker_dragged.emit(0.9)
+app.processEvents()
+check("dragging the long-axis marker scrolls the CT short-axis there",
+      abs(C2.cur - round(0.9 * (C2.total - 1))) <= 1, (C2.cur, C2.total))
+C2._toggle_reverse()
+app.processEvents()
+w2._drive_linked()
+check("CT short-axis reversed → the marker stays on the same section",
+      np.allclose(G.canvas.coreg_marker_pt,
+                  cv_[C2.total - 1 - C2.cur]),
+      (C2.cur, G.canvas.coreg_marker_pt))
+
+# SyncCT: the 2-CT link's visible name
+import inspect  # noqa: E402
+from multi_dicomviewer.ui import main_window as _mwm  # noqa: E402
+src_mw = inspect.getsource(_mwm)
+check("the 2-CT link is called SyncCT (menu / bar / End button)",
+      't("SyncCT")' in src_mw and 't("SyncCT終了")' in src_mw
+      and 't("SyncView")' not in src_mw
+      and t("SyncCT終了") != "", t("SyncCT終了"))
+
+print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
+sys.stdout.flush()
+os._exit(1 if fails else 0)

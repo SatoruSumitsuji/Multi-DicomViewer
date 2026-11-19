@@ -95,6 +95,12 @@ class _CoregPane:
         #: For a CT short-axis pane: the pre-rendered (n, H, W) HU cross-section
         #: stack (a synthetic pull-back). None for a normal series pane.
         self._stack = None
+        #: CT long-axis GUIDE pane (cpr_cosync_guide_spec): index of the CT
+        #: short-axis pane it belongs to — its marker sits at that pane's
+        #: section directly (no tracing / MultiReg points). None otherwise.
+        self.link_ct = None
+        self._link_id = None
+        self._base_rev = False       # the CT stack came in reversed
 
         self.frame = QFrame()
         self.frame.setFrameShape(QFrame.Shape.Box)
@@ -235,7 +241,9 @@ class _CoregPane:
         self.total = self.plane.total_frames if self.plane else 0
         self.is_color = bool(loaded.is_color
                              or getattr(self.plane, "is_color", False))
-        self.is_ivus = (series.modality == Modality.IVUS)
+        # every non-angio series scrubs like an IVUS pull-back — no Modality
+        # judgement (user 2026-11-19: IVUS can be stored as Modality "US")
+        self.is_ivus = (series.modality != Modality.XA)
         self._init_wl(loaded)
         self.canvas.spacing_mm = dicom_io.series_spacing_mm(series)
         self.master_radio.setVisible(self.is_ivus)
@@ -274,6 +282,34 @@ class _CoregPane:
         self.slider.setValue(start)
         self.slider.blockSignals(False)
         self.show_frame(start)
+
+    def load_guide(self, spec: dict) -> None:
+        """Load the CT long-axis view (CTViewer.cpr_cosync_guide_spec) as an
+        angio-like still whose guide is the short-axis centreline itself."""
+        self.series = None
+        self.plane = None
+        self._stack = np.asarray(spec["image"], np.float32)[None]
+        self.total = 1
+        self.window = float(spec.get("window") or 1.0)
+        self.level = float(spec.get("level") or 0.0)
+        self.is_color = False
+        self.is_ivus = False
+        self.canvas.spacing_mm = spec.get("spacing_mm")
+        self.master_radio.setVisible(False)
+        self._reversed = False
+        self.reverse_btn.setVisible(False)
+        self.zoom_btn.setVisible(True)
+        self.wl_btn.setVisible(True)
+        self.canvas.set_coreg_visible(True)
+        self.canvas.set_free_rotation_enabled(False)
+        self.title.setText(spec.get("label", "CT long-axis"))
+        self.cur = 0
+        self.slider.blockSignals(True)
+        self.slider.setEnabled(False)
+        self.slider.setRange(0, 0)
+        self.slider.setValue(0)
+        self.slider.blockSignals(False)
+        self.show_frame(0)
 
     def load_stack(self, spec: dict) -> None:
         """Load a CT short-axis stack (from CTViewer.cpr_cosync_spec) as an
@@ -748,8 +784,20 @@ class CoregWindow(QMainWindow):
             self.panes.append(pane)
             r, c = self._grid_pos[i]
             self._grid.addWidget(pane.frame, r, c)
+            if isinstance(spec, dict) and spec.get("kind") == "ct_guide":
+                # CT long-axis view: its guide = the short-axis centreline
+                pane.load_guide(spec)
+                pane._link_id = spec.get("link_id")
+                self._wire_angio(pane)
+                curve = [tuple(map(float, q)) for q in spec.get("curve", [])]
+                self._guides[i] = {"vertices": [], "curve": curve,
+                                   "frame": 0, "auto": True}
+                pane.canvas.set_coreg_guide([], curve)
+                continue
             if isinstance(spec, dict):            # CT short-axis stack pane
                 pane.load_stack(spec)
+                pane._link_id = spec.get("link_id")
+                pane._base_rev = bool(spec.get("reversed"))
                 continue
             # (series, plane, start[, rotation, reverse]) — the last two carry
             # the source IVUS's display rotation + play-order so the pane opens
@@ -762,6 +810,15 @@ class CoregWindow(QMainWindow):
                 self._wire_angio(pane)
                 self._guides[i] = {"vertices": [], "curve": [], "frame": None}
                 self._add_guide_row(pane)
+        # Each CT long-axis guide pane → the CT short-axis pane it belongs to.
+        for gp in self.panes:
+            if gp.is_ivus or gp._link_id is None:
+                continue
+            for q in self.panes:
+                if q.is_ivus and q._stack is not None \
+                        and q._link_id == gp._link_id:
+                    gp.link_ct = q.index
+                    break
         # Pick the first IVUS pane as the active master.
         for pane in self.panes:
             if pane.is_ivus:
@@ -887,7 +944,7 @@ class CoregWindow(QMainWindow):
         # XA is optional: with no angio panes this is a pure multi-IVUS sync
         # point. (An untraced XA is handled at commit — the marker just has
         # no guide, or the user turns on XA除外.)
-        has_angio = any(not p.is_ivus for p in self.panes)
+        has_angio = any(self._is_manual_angio(p) for p in self.panes)
         self._placing = True
         modifying = 0 <= self._selected_lm < len(self._landmarks)
         # Modify: seed from the point's existing angio positions. New: empty.
@@ -901,6 +958,13 @@ class CoregWindow(QMainWindow):
         self._exclude_xa_cb.setVisible(has_angio)
         lm_sel = self._landmarks[self._selected_lm] if modifying else None
         for p in self.panes:
+            if p.link_ct is not None:
+                # the CT long-axis guide follows its short-axis by geometry —
+                # no position to set for a MultiReg point
+                p.set_excluded(True)
+                p.excl_btn.setVisible(False)
+                p.canvas.set_coreg_edit(False)
+                continue
             # 除外: a new point starts with every image in; an edited point
             # starts with the images it already uses (the others excluded).
             if lm_sel is None:
@@ -990,14 +1054,15 @@ class CoregWindow(QMainWindow):
     def _commit_placing(self) -> None:
         if not self._placing:
             return
-        has_angio = any(not p.is_ivus for p in self.panes)
+        has_angio = any(self._is_manual_angio(p) for p in self.panes)
         # Every angio 除外'd = the same as Exclude XA (an IVUS-only point).
         all_xa_out = has_angio and all(p.excluded() for p in self.panes
-                                       if not p.is_ivus)
+                                       if self._is_manual_angio(p))
         exclude_xa = (self._exclude_xa_cb.isChecked() or not has_angio
                       or all_xa_out)
         pending = {i: v for i, v in self._pending_fracs.items()
-                   if not self.panes[i].excluded()}
+                   if not self.panes[i].excluded()
+                   and self.panes[i].link_ct is None}
         if not exclude_xa and not pending:
             QMessageBox.information(
                 self, "MultiReg",
@@ -1060,7 +1125,7 @@ class CoregWindow(QMainWindow):
     # ------------------------------------------------- landmark list
     def _landmark_tip(self, lm) -> str:
         ivus_idx = [p.index for p in self.panes if p.is_ivus]
-        xa_idx = [p.index for p in self.panes if not p.is_ivus]
+        xa_idx = [p.index for p in self.panes if self._is_manual_angio(p)]
         fr = " ".join(
             f"I{i + 1}:{lm['frames'][idx] + 1}" if idx in lm["frames"]
             else f"I{i + 1}:–" for i, idx in enumerate(ivus_idx))
@@ -1075,7 +1140,7 @@ class CoregWindow(QMainWindow):
         angio guide (#1, #2 …) showing on which traces this point exists.
         Two lines so up to 3 IVUS × 3 XA still fit at the button font size."""
         ivus = [p for p in self.panes if p.is_ivus]
-        xa = [p for p in self.panes if not p.is_ivus]
+        xa = [p for p in self.panes if self._is_manual_angio(p)]
         toks = []
         for p in ivus:
             if p.index in lm["frames"]:
@@ -1405,9 +1470,10 @@ class CoregWindow(QMainWindow):
         self._selected_lm = -1
         self._renaming = -1
         # Guides: keep only those whose pane still exists and is an angio pane.
-        valid = {p.index for p in self.panes if not p.is_ivus}
+        valid = {p.index for p in self.panes if self._is_manual_angio(p)}
         for i in list(self._guides):
-            self._clear_guide(i)
+            if i in valid:
+                self._clear_guide(i)
         for i, g in (guides or {}).items():
             if i not in valid:
                 continue
@@ -1733,6 +1799,7 @@ class CoregWindow(QMainWindow):
         # Every scrubbed IVUS (master or not) updates its own 按分 rotation.
         self._apply_rotation(self.panes[pane_idx])
         if pane_idx != self._active_ivus:
+            self._drive_linked()
             return
         self._syncing = True
         try:
@@ -1793,12 +1860,13 @@ class CoregWindow(QMainWindow):
         the UNIFIED position (which can run past the master's own range): the
         fraction extrapolates and clamps to the guide ends, so the marker keeps
         moving over the WHOLE bar instead of freezing where the master clamps."""
+        self._drive_linked()
         if self._active_ivus < 0 or self._placing:
             return
         R = self._active_ivus
         fR = self.panes[R].cur if frame_override is None else frame_override
         for pane in self.panes:
-            if pane.is_ivus:
+            if pane.is_ivus or pane.link_ct is not None:
                 continue
             curve = self._guides.get(pane.index, {}).get("curve", [])
             # Anchor foot-points on this guide (for the amber dots).
@@ -1814,6 +1882,37 @@ class CoregWindow(QMainWindow):
                 None if (s is None or not curve)
                 else coreg.point_at_fraction(curve, s))
 
+    def _is_manual_angio(self, p) -> bool:
+        """An angio pane whose guide is traced by hand (not a CT long-axis
+        guide that follows its short-axis by geometry)."""
+        return (not p.is_ivus) and p.link_ct is None
+
+    def _linked_index(self, gp):
+        """Centreline index (= guide curve point) of the CT short-axis section
+        that guide pane *gp* belongs to, or None."""
+        if gp.link_ct is None or not (0 <= gp.link_ct < len(self.panes)):
+            return None
+        ct = self.panes[gp.link_ct]
+        n = len(self._guides.get(gp.index, {}).get("curve", []))
+        if n == 0 or ct.total <= 0:
+            return None
+        i = max(0, min(int(ct.cur), ct.total - 1))
+        if bool(ct._base_rev) != bool(ct._reversed):     # shown distal→prox
+            i = ct.total - 1 - i
+        return max(0, min(i, n - 1))
+
+    def _drive_linked(self) -> None:
+        """CT long-axis guide panes: the marker sits exactly at the section
+        their CT short-axis shows (its own centreline point)."""
+        for gp in self.panes:
+            if gp.link_ct is None:
+                continue
+            curve = self._guides.get(gp.index, {}).get("curve", [])
+            i = self._linked_index(gp)
+            gp.canvas.set_coreg_anchors([])
+            gp.canvas.set_coreg_marker(
+                None if i is None else tuple(curve[i]))
+
     def _on_anchor_clicked(self, pane_idx: int, idx: int) -> None:
         """Review: clicking this view's idx-th amber anchor jumps the active
         IVUS to that landmark's frame, so the green marker lands on the dot."""
@@ -1827,6 +1926,21 @@ class CoregWindow(QMainWindow):
     def _on_marker_dragged(self, pane_idx: int, s: float) -> None:
         """Review: dragging the green marker maps the guide fraction back to
         an IVUS frame and scrubs the active IVUS (reverse driving)."""
+        gp = self.panes[pane_idx]
+        if gp.link_ct is not None and not self._placing:
+            # dragging the CT long-axis marker scrolls its short-axis there
+            curve = self._guides.get(pane_idx, {}).get("curve", [])
+            ct = self.panes[gp.link_ct]
+            if len(curve) >= 2 and ct.total > 0:
+                cum = np.concatenate([[0.0], np.cumsum(np.hypot(
+                    *np.diff(np.asarray(curve, float), axis=0).T))])
+                tot = float(cum[-1]) or 1.0
+                i = int(np.argmin(np.abs(cum / tot - float(s))))
+                if bool(ct._base_rev) != bool(ct._reversed):
+                    i = ct.total - 1 - i
+                ct.slider.setValue(max(0, min(i, ct.total - 1)))
+                self._drive_linked()
+            return
         if self._active_ivus < 0 or self._placing:
             return
         R = self._active_ivus

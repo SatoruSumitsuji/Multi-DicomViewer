@@ -1,4 +1,4 @@
-"""SyncView: a live link between TWO 3-D CT viewers shown side by side so that
+"""SyncCT: a live link between TWO 3-D CT viewers shown side by side so that
 mouse / keyboard operations in EITHER are mirrored to the other, for comparing
 two CTs under identical manipulation (e.g. the same case at MidDiastole vs
 EndSystole).
@@ -8,7 +8,7 @@ Two layers of mirroring:
 1. VIEW OPERATIONS (always) — pan / rotate / zoom / window-level / paging /
    thickness are echoed as an incremental DELTA (the two scans are unregistered,
    so an absolute copy is meaningless). The user aligns both views manually,
-   then turns SyncView on; from then on every gesture is echoed to the peer.
+   then turns SyncCT on; from then on every gesture is echoed to the peer.
    On entry the shell offers to match the zoom so the deltas keep the pair at
    1:1 scale.
 
@@ -202,7 +202,7 @@ class SyncViewLink(QObject):
         return list(self._v)
 
     def teardown(self) -> None:
-        """Drop the link: disconnect both layers and leave SyncView / the level
+        """Drop the link: disconnect both layers and leave SyncCT / the level
         link on both viewers."""
         self._settle.stop()
         self._undo.clear()

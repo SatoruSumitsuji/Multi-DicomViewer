@@ -2866,12 +2866,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     #: thread (see _vr_async / _vr_worker / _on_vr_done).
     _vr_done = pyqtSignal(object)
 
-    #: SyncView: a view operation (pan / rotate / zoom / W-L / paging / thick)
+    #: SyncCT: a view operation (pan / rotate / zoom / W-L / paging / thick)
     #: happened here — the shell mirrors it to the paired CT as an identical
     #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
-    #: while SyncView-linked and NOT while applying a mirrored op (no echo).
+    #: while SyncCT-linked and NOT while applying a mirrored op (no echo).
     sync_view_op = pyqtSignal(str, object)
-    #: SyncView LV-volume level link: the short-axis LEVEL changed — mm ALONG the
+    #: SyncCT LV-volume level link: the short-axis LEVEL changed — mm ALONG the
     #: LV long axis from the apex. The shell mirrors it to the paired CT (raw mm,
     #: or apex→base fraction under 按分). Emitted only while level-linked + paged.
     lv_cosync_level_changed = pyqtSignal(float)
@@ -3247,11 +3247,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cross_ppt = (0.0, 0.0)         # prev world point (move mode)
         self._cross_prev = 0.0               # crosshair-rotate prev angle
         self._spin_prev = None               # SPIN previous cursor angle
-        #: SyncView: True while this CT is linked to a peer CT for mirrored view
+        #: SyncCT: True while this CT is linked to a peer CT for mirrored view
         #: operations; _applying guards against echoing a mirrored op back.
         self._sync_view_on = False
         self._sync_view_applying = False
-        #: SyncView LV-volume level link: while True, paging steps along the LV
+        #: SyncCT LV-volume level link: while True, paging steps along the LV
         #: long axis and broadcasts the level (lv_cosync_level_changed).
         self._lv_cosync_on = False
 
@@ -4974,7 +4974,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (not on every click in the same pane — that delayed the click's dot).
         if changed and hasattr(self, "vr_active") and self.vr_active():
             self._refresh_tool_availability()
-        # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
+        # SyncCT: keep BOTH viewers' selected sub-pane (A=left / B=right) the
         # same, so a shared Rt90/Flip/… acts on the matching side in both.
         if (getattr(self, "_sync_view_on", False)
                 and not getattr(self, "_sync_view_applying", False)):
@@ -6097,6 +6097,18 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p.cam.height = 2.0 * ps
         p.cam.width = 2.0 * ps * (pw / ph)
         p.cam.depth_range = (0.1, 4.0 * self._cam_off + self._diag)
+
+    def _cpr_guide_view(self, key):
+        """The map pane *key* as shown: (focal 3-D point, screen-right,
+        screen-up, half width, half height in mm) — for the MultiReg guide
+        image (cpr_cosync_guide_spec)."""
+        ur, vr, _w, focal = self._cam_basis(key)
+        p = self.pane[key]
+        ps = max(1e-3, float(self._ps[key]))
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        return (np.asarray(focal, float), np.asarray(ur, float),
+                np.asarray(vr, float), ps * pw / ph, ps)
 
     def _cam_basis(self, key):
         """Camera right/up/back axes (3-D world) and focal point. Right/up are
@@ -7558,7 +7570,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               tool=None):
         if self._vol is None:
             return
-        # *tool* overrides the active tool for this call — used by SyncView to
+        # *tool* overrides the active tool for this call — used by SyncCT to
         # replay a peer's operation with the SAME tool regardless of what this
         # viewer's tool happens to be set to.
         t = tool if tool is not None else self._tool
@@ -7733,7 +7745,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                         self._spin_prev = phi
                         for k in (("A", "B") if both else (which,)):
                             self._roll[k] += _SPIN_SIGN * dphi
-                        # SyncView: mirror SPIN as the ROLL-ANGLE delta (screen
+                        # SyncCT: mirror SPIN as the ROLL-ANGLE delta (screen
                         # position isn't portable, the roll increment is).
                         if (self._sync_view_on
                                 and not self._sync_view_applying):
@@ -7743,7 +7755,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # image keeps its look; full quality returns when the drag settles).
         # THICK included: the coarse slab still updates live as it's adjusted.
         self._refresh(lod=True, only=only_pane)
-        # SyncView: mirror this gesture to the paired CT as the SAME delta.
+        # SyncCT: mirror this gesture to the paired CT as the SAME delta.
         # SPIN is excluded (its angle is derived from screen-absolute cursor
         # position about each pane's own centre — not a portable delta). PAGING
         # is excluded while the LV-level link is on (_lv_cosync_on): the level is
@@ -7761,7 +7773,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         if self._lv_pick_locked():          # MV+Apex Auto: keep the same image
             return
-        # SyncView (LV-volume level link): paging steps ALONG the LV long axis and
+        # SyncCT (LV-volume level link): paging steps ALONG the LV long axis and
         # broadcasts the level so the paired CT mirrors it (mm / apex→base
         # fraction). Takes priority so both views page together.
         if (getattr(self, "_lv_cosync_on", False)
@@ -7791,21 +7803,21 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._sync_emit_wheel(which, delta)
 
     def _sync_emit_wheel(self, which, delta):
-        """SyncView: mirror a paging wheel step to the paired CT (same slice
+        """SyncCT: mirror a paging wheel step to the paired CT (same slice
         count, same pane)."""
         if self._sync_view_on and not self._sync_view_applying:
             self.sync_view_op.emit(
                 "wheel", {"which": which, "delta": int(delta)})
 
-    # ------------------------------------------------ SyncView contract
+    # ------------------------------------------------ SyncCT contract
     def sync_view_available(self) -> bool:
-        """Eligible for a SyncView link: any CT with a volume loaded. LV-analysis
-        / short-axis / CPR views are fine — SyncView mirrors only VIEW operations
+        """Eligible for a SyncCT link: any CT with a volume loaded. LV-analysis
+        / short-axis / CPR views are fine — SyncCT mirrors only VIEW operations
         (pan/zoom/rotate/W-L/paging/thickness), never the LV geometry."""
         return self._vol is not None
 
     # ------------------------------------------------ LV-volume level link
-    # (SyncView reuses this contract — parity with the VTK viewer — to mirror the
+    # (SyncCT reuses this contract — parity with the VTK viewer — to mirror the
     #  short-axis LEVEL along the apex→MV axis as mm or apex→base fraction.)
     def _lv_cosync_axis(self):
         """(apex, axis_unit, along_min_mm, along_max_mm) of the LV long axis, or
@@ -7891,7 +7903,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                     silent=silent)
 
     def lv_cosync_step(self, step: int) -> None:
-        """One paging notch along the long axis (used when SyncView-level-on)."""
+        """One paging notch along the long axis (used when SyncCT-level-on)."""
         info = self._lv_cosync_axis()
         if info is None:
             return
@@ -7903,7 +7915,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self.lv_cosync_set_level_mm(cur + dmm)
 
     def set_sync_view_on(self, on: bool) -> None:
-        """Enter/leave SyncView. While ON, view gestures are broadcast
+        """Enter/leave SyncCT. While ON, view gestures are broadcast
         (sync_view_op) so the paired CT mirrors them."""
         self._sync_view_on = bool(on)
 
@@ -7922,7 +7934,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                            tool=params.get("tool"))
             elif kind == "wheel":
                 self._wheel(params["which"], params["delta"])
-            elif kind == "spin":                     # roll-angle delta (SyncView)
+            elif kind == "spin":                     # roll-angle delta (SyncCT)
                 w = params["which"]
                 self._roll[w] += _SPIN_SIGN * float(params["dphi"])
                 self._refresh(lod=True, only=w)
@@ -7980,7 +7992,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._refresh()
 
     def set_syncview_ui(self, on: bool) -> None:
-        """SyncView: hide this viewer's OWN toolbar + below bars (plane / LV /
+        """SyncCT: hide this viewer's OWN toolbar + below bars (plane / LV /
         seek / CPR), so one shared toolbar (in the shell) drives both panes.
         Prior visibilities are remembered and restored on exit. View-only, so
         Measure is turned off."""
@@ -8364,7 +8376,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._measure_hover_clear(key)
 
     def _cross_move(self, which, sx, sy):
-        """Crosshair drag — wraps the impl to MIRROR the gesture to a SyncView
+        """Crosshair drag — wraps the impl to MIRROR the gesture to a SyncCT
         peer as a portable pane-plane delta (Δcentre in u,v + Δcrossline angle)."""
         c0 = np.asarray(self._center, float).copy()
         a0 = self._cross_ang[which]
@@ -8381,7 +8393,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                               "mode": self._cross_mode})
 
     def apply_cross_delta(self, which, du, dv, dang, mode="move") -> None:
-        """Apply a peer's crosshair gesture here (SyncView)."""
+        """Apply a peer's crosshair gesture here (SyncCT)."""
         u, v, _n = self._frame[which]
         other = "B" if which == "A" else "A"
         if abs(du) > 1e-12 or abs(dv) > 1e-12:
