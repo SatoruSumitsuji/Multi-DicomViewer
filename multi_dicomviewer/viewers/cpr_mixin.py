@@ -658,6 +658,8 @@ class CPRMixin:
             gp = self._cpr_gap_pts_left(m, ctrl)
             if gp:
                 out["gap_pts"] = gp
+            if m.get("_cpr_excl"):
+                out["territory_excluded"] = True
         for key in ("detail_name", "fix_name"):
             val = ((m.get("_cpr_names") or {}) if m is not None else {}).get(key)
             if val:
@@ -696,6 +698,8 @@ class CPRMixin:
             m["_cpr_manual"] = [list(map(float, q)) for q in data["ctrl_manual"]]
         if data.get("gap_pts"):
             m["_cpr_gap_pts"] = [list(map(float, q)) for q in data["gap_pts"]]
+        if data.get("territory_excluded"):
+            m["_cpr_excl"] = True
         names = {k: data[k] for k in ("detail_name", "fix_name")
                  if isinstance(data.get(k), str) and data[k].strip()}
         if names:

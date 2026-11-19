@@ -69,6 +69,10 @@ class Vessel:
     auto_traced: bool = False
     #: FinTrace column: the user marked the trace (Auto or Manual) as finished
     fin_traced: bool = False
+    #: 除外 / Excl. column: left out of the Territory (no myocardium is
+    #: assigned to its own centreline — e.g. RCA #1-3 or an LM without
+    #: real side branches; the nearest other vessel takes those voxels)
+    excluded: bool = False
     #: Coronary Tree list columns DetailName / FixName (→ file name on rename)
     detail_name: str = ""
     fix_name: str = ""
@@ -280,7 +284,9 @@ class CoronaryTree:
         KD-tree. Returns (pts (P,3), owner_code (P,) int, owner_idx (P,) int,
         code_to_vid list) where owner_code indexes code_to_vid."""
         pts, code, idx, code_to_vid = [], [], [], []
-        for c, (vid, v) in enumerate(self.vessels.items()):
+        kept = [(vid, v) for vid, v in self.vessels.items()
+                if not getattr(v, "excluded", False)]
+        for c, (vid, v) in enumerate(kept):
             pts.append(v.points)
             code.append(np.full(v.n, c, int))
             idx.append(np.arange(v.n))
@@ -382,6 +388,8 @@ class CoronaryTree:
                 d["auto_traced"] = True
             if v.fin_traced:
                 d["fin_traced"] = True
+            if v.excluded:
+                d["territory_excluded"] = True
             if v.detail_name:
                 d["detail_name"] = v.detail_name
             if v.fix_name:
@@ -417,6 +425,7 @@ class CoronaryTree:
                       else None),
                 auto_traced=bool(d.get("auto_traced", False)),
                 fin_traced=bool(d.get("fin_traced", False)),
+                excluded=bool(d.get("territory_excluded", False)),
                 detail_name=str(d.get("detail_name", "") or ""),
                 fix_name=str(d.get("fix_name", "") or ""),
                 ctrl_manual=(np.asarray(d["ctrl_manual"], float)
@@ -580,6 +589,10 @@ def format_territory_report(tree: CoronaryTree, lvf,
                  f"{ml:8.1f} mL  {pct(ml)}")
     if not roots:
         L.append("  (no roots set — assign LM/LAD/LCX/RCA roles first)")
+    excl = [short_vessel_name(v.name) for v in tree.vessels.values()
+            if getattr(v, "excluded", False)]
+    if excl:
+        L.append(f"  excluded (Excl.)        : {', '.join(excl)}")
     left = sum(by_role.get(r, 0.0) for r in _LEFT_ROLES)
     if left > 0:
         present = [r for r in _LEFT_ROLES if by_role.get(r)]

@@ -104,18 +104,20 @@ _CPR_STEP_MM = 0.5
 #: an existing vessel attaches to it. Was 3 mm; widened to 5 mm per user request.
 _CONNECT_TOL_MM = 5.0
 
-#: Vessel list columns: Vessel, Role, Branches, AutoTrace, FinTrace, Myocardium.
+#: Vessel list columns: Vessel, Role, Excl., Branches, AutoTrace, FinTrace,
+#: Myocardium. Excl. (除外) = a checkbox: that line is left out of the
+#: Territory (user 2026-11-19 — RCA #1-3, an LM without real side branches).
 #: Every column but Vessel can be folded to a narrow "×" (header ×). The
 #: Vessel column is the line's name (名前を変更 renames the serial 01, 02 …);
 #: ファイル名更新 names the files <name> + the tree's ONE FixName (row 2).
-_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_FIN, _C_MYO = range(6)
-_N_COLS = 6
-_COL_DEFAULT_W = {_C_ROLE: 76, _C_BR: 76, _C_AUTO: 90, _C_FIN: 84,
-                  _C_MYO: 120}
+_C_NAME, _C_ROLE, _C_EXCL, _C_BR, _C_AUTO, _C_FIN, _C_MYO = range(7)
+_N_COLS = 7
+_COL_DEFAULT_W = {_C_ROLE: 76, _C_EXCL: 64, _C_BR: 76, _C_AUTO: 90,
+                  _C_FIN: 84, _C_MYO: 120}
 #: AutoTrace / FinTrace cell marks
 _MARK_YES, _MARK_NO = "◯", "×"
 #: ui_state key of the folded columns (v2: FinTrace inserted → indices moved)
-_FOLD_KEY = "corotree_folded_cols3"   # v3: DetailName / FixName removed
+_FOLD_KEY = "corotree_folded_cols4"   # v4: Excl. inserted after Role
 _COL_FOLDED_W = 20
 _X_W = 14                                     # the "×" hit area at a header's right
 
@@ -512,9 +514,11 @@ class CoronaryTreeWindow(SnapDock):
             outer.addLayout(row)
             return made
 
-        # CPR row: build the tree from per-vessel .cpr.json files, then
-        # ファイル名更新 / 一括AutoTrace / 取消 at its right.
-        cpr_btns = _row(t("CPR："), [
+        # CPR row: build the tree from per-vessel .cpr.json files — just
+        # 読込 / フォルダ更新 / 接続 (user 2026-11-19: 消去 → the list's
+        # right-click 削除, which takes a Ctrl / Shift multi-selection;
+        # ファイル名更新 / 一括AutoTrace / 取消 were not used).
+        _row(t("CPR："), [
             (t("読込"), t("枝ごとの .cpr.json を複数選択で読込（未接続で追加）"),
              self._load_cpr, False),
             (t("フォルダ更新"),
@@ -524,23 +528,8 @@ class CoronaryTreeWindow(SnapDock):
              self._resync_from_folder, False),
             (t("接続"), t("読み込んだ枝を最近接端点で接続 (5mm以内)"),
              self._connect, False),
-            (t("消去"),
-             t("下の血管リストで選択した血管（下流の枝を含む）を一覧から消去。"
-               "Ctrlで複数選択・Shiftで範囲選択（元のCPRファイルは残る）"),
-             self._delete_selected, False),
-            (t("ファイル名更新"),
-             t("各線の .cpr.json を「血管名 + FixName」に一括で名前変更し、"
-               "フォルダ更新を実行（血管名は右クリック →「名前を変更」）"),
-             self._batch_rename, False),
-            (t("一括AutoTrace"),
-             t("AutoTrace が × の線をまとめて自動トレース（FinTrace が ◯ の線は"
-               "除く。Vessel を選択中は選択した行だけ）。結果は同じ .cpr.json に上書き"),
-             self._batch_auto_trace, False),
-            (t("取消"), t("直前の一括AutoTraceを取り消し、手動の点に戻す"),
-             self._batch_auto_undo, False),
         ])
-        self._rename_btn, self._bulk_auto_btn, self._bulk_undo_btn = \
-            cpr_btns[4:7]
+        self._rename_btn = self._bulk_auto_btn = self._bulk_undo_btn = None
         # FixName row: ONE FixName for the whole tree (e.g. @030) — the files
         # become <vessel name> + FixName on ファイル名更新.
         fix_row = QHBoxLayout()
@@ -652,9 +641,9 @@ class CoronaryTreeWindow(SnapDock):
 
         self._tree_w = QTreeWidget()
         self._tree_w.setColumnCount(_N_COLS)
-        # Vessel, Role, Branches, AutoTrace, FinTrace, Myocardium.
-        self._col_labels = [t("血管"), t("役割"), t("分岐"), t("AutoTrace"),
-                            t("FinTrace"), t("心筋量")]
+        # Vessel, Role, Excl., Branches, AutoTrace, FinTrace, Myocardium.
+        self._col_labels = [t("血管"), t("役割"), t("除外・Excl."), t("分岐"),
+                            t("AutoTrace"), t("FinTrace"), t("心筋量")]
         hdr = _XHeader(self._tree_w)
         self._tree_w.setHeader(hdr)
         self._tree_w.setHeaderLabels(self._col_labels)
@@ -662,6 +651,8 @@ class CoronaryTreeWindow(SnapDock):
         hdr.toggled.connect(self._toggle_col_fold)
         self._tree_w.headerItem().setToolTip(
             _C_ROLE, t("列名右の × で列を折りたたみ（× をもう一度押すと戻ります）"))
+        self._tree_w.headerItem().setToolTip(
+            _C_EXCL, t("チェックした CPR 線は Territory 計算から除外します（RCA #1-3、側枝のない LM など）"))
         # 血管 column auto-fits its contents so the full vessel name (now with the
         # @SeNN suffix) is always visible instead of being truncated at a fixed width.
         hdr.setSectionResizeMode(_C_NAME, QHeaderView.ResizeMode.ResizeToContents)
@@ -914,6 +905,8 @@ class CoronaryTreeWindow(SnapDock):
         out = {"auto_traced": bool(getattr(v, "auto_traced", False))}
         if getattr(v, "fin_traced", False):
             out["fin_traced"] = True
+        if getattr(v, "excluded", False):
+            out["territory_excluded"] = True
         if getattr(v, "ctrl_manual", None) is not None:
             out["ctrl_manual"] = np.asarray(v.ctrl_manual, float).round(4).tolist()
         if getattr(v, "detail_name", ""):
@@ -1496,6 +1489,7 @@ class CoronaryTreeWindow(SnapDock):
             v.auto_traced = bool(data.get("auto_traced"))
         # The file is the record of FinTrace (◯ writes the key, × removes it).
         v.fin_traced = bool(data.get("fin_traced"))
+        v.excluded = bool(data.get("territory_excluded"))
         for key in ("detail_name", "fix_name"):
             val = data.get(key)
             if isinstance(val, str) and val.strip():
@@ -1614,6 +1608,10 @@ class CoronaryTreeWindow(SnapDock):
             it.setTextAlignment(c, int(Qt.AlignmentFlag.AlignCenter))
             it.setForeground(c, QColor("#1a7f37" if on else "#b00000"))
         it.setToolTip(_C_FIN, t("FinTrace（トレース完了）：ダブルクリックで ◯/× を切替。複数行は Shift/Ctrl で選んで右クリック"))
+        it.setCheckState(_C_EXCL, Qt.CheckState.Checked
+                         if getattr(v, "excluded", False)
+                         else Qt.CheckState.Unchecked)
+        it.setToolTip(_C_EXCL, t("チェックした CPR 線は Territory 計算から除外します（RCA #1-3、側枝のない LM など）"))
         # Monospace 心筋量 column so the padded % / mL line up vertically.
         mf = QFont("Consolas")
         mf.setStyleHint(QFont.StyleHint.Monospace)
@@ -1799,6 +1797,15 @@ class CoronaryTreeWindow(SnapDock):
 
     def _on_item_changed(self, item, _col):
         if self._building:
+            return
+        if _col == _C_EXCL:
+            vid = item.data(0, _UID_ROLE)
+            v = self._tree.vessels.get(vid) if vid else None
+            if v is not None:
+                on = item.checkState(_C_EXCL) == Qt.CheckState.Checked
+                if bool(v.excluded) != on:
+                    self._activate_item_ct(item)
+                    self._set_excluded([vid], on)
             return
         if _col not in (0, -1):
             return
@@ -2967,7 +2974,9 @@ class CoronaryTreeWindow(SnapDock):
         elif chosen is a_par:
             self._reparent()
         elif chosen is a_del:
-            self._delete()
+            # every selected line (Ctrl / Shift) + its downstream branches —
+            # the former 消去 button's job (that button is gone)
+            self._delete_selected()
 
     def _reverse(self, vid):
         """Flip a vessel's proximal↔distal direction. A connected branch is also
@@ -3891,6 +3900,32 @@ class CoronaryTreeWindow(SnapDock):
             self.treeChanged.emit()
             self._push_overlay()
             self._hint.setText(t("{n} 本を手動の点に戻しました。", n=n))
+
+    def _set_excluded(self, vids, on: bool) -> None:
+        """除外 / Excl. on the chosen lines: left out of (or back in) the
+        Territory; also written into each .cpr.json (territory_excluded) so a
+        Folder Sync / reload keeps it. An already calculated Territory is
+        re-assigned (treeChanged)."""
+        tree = self._tree
+        b = self._bundle()
+        n = 0
+        for vid in vids:
+            v = tree.vessels.get(vid)
+            if v is None:
+                continue
+            v.excluded = bool(on)
+            path = b["paths"].get(vid, "") or ""
+            d = self._read_cpr(path) if path else None
+            if d is not None and bool(d.get("territory_excluded")) != bool(on):
+                if on:
+                    d["territory_excluded"] = True
+                else:
+                    d.pop("territory_excluded", None)
+                self._write_cpr(path, d)
+            n += 1
+        if n:
+            self._populate()
+            self.treeChanged.emit()
 
     def _set_fin_traced(self, vids, on: bool) -> None:
         """FinTrace ◯/× on the chosen rows; also written into each .cpr.json

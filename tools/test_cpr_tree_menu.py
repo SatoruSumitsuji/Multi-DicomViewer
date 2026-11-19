@@ -448,7 +448,7 @@ class TW:
 
 
 check("no DetailName / FixName columns any more",
-      ctw._N_COLS == 6 and not hasattr(ctw, "_C_DETAIL")
+      ctw._N_COLS == 7 and not hasattr(ctw, "_C_DETAIL")
       and not hasattr(ctw, "_C_FIX") and ctw._XHeader.PLUS_COLS == ())
 check("no per-line FixName actions left",
       not hasattr(W, "_fix_name_copy_all") and not hasattr(W, "_set_fix_name_bulk"))
@@ -638,6 +638,83 @@ check("Open Folder: next to FixName, opens the folder of the line files",
       == os.path.normcase(os.path.normpath(_fold)), _opened)
 check("Open Folder: no file yet → told, nothing opened",
       len(_opened) == 1 and len(_warned) == 1, _warned)
+# 除外・Excl. column (right of Role, left of Branches): a checked line is
+# left out of the Territory (user 2026-11-19)
+import json as _json  # noqa: E402
+from multi_dicomviewer.core import coronary_territory as _ct  # noqa: E402
+check("Excl. column sits right of Role, left of Branches",
+      ctw._C_ROLE + 1 == ctw._C_EXCL == ctw._C_BR - 1
+      and dk._tree_w.headerItem().text(ctw._C_EXCL) == t("除外・Excl."),
+      dk._tree_w.headerItem().text(ctw._C_EXCL))
+_xp = os.path.join(_fold, "LAD9.cpr.json")
+open(_xp, "w").write(_json.dumps({"ctrl": [[0, 0, 0], [0, 0, 20]]}))
+_b["paths"]["x"] = _xp
+dk._populate()
+_it3 = dk._item_for_vid("x")
+_tc = []
+dk.treeChanged.connect(lambda: _tc.append(1))
+_it3.setCheckState(ctw._C_EXCL, _Qt.CheckState.Checked)
+app.processEvents()
+check("Excl. checked → the line is excluded, its .cpr.json records it, "
+      "the Territory is re-assigned",
+      _b["tree"].vessels["x"].excluded
+      and _json.load(open(_xp)).get("territory_excluded") is True
+      and _tc, (_b["tree"].vessels["x"].excluded, _json.load(open(_xp))))
+check("Excl. survives the list rebuild",
+      dk._item_for_vid("x").checkState(ctw._C_EXCL) == _Qt.CheckState.Checked)
+dk._item_for_vid("x").setCheckState(ctw._C_EXCL, _Qt.CheckState.Unchecked)
+app.processEvents()
+check("Excl. unchecked → back in, the key removed from the file",
+      not _b["tree"].vessels["x"].excluded
+      and "territory_excluded" not in _json.load(open(_xp)))
+# core: an excluded line gets no voxels; the nearest other line takes them
+_tr = _ct.CoronaryTree()
+_tr.add_root("lm", "LM", "LM", [[0, 0, 0], [0, 0, 10]])
+_tr.add_root("lad", "LAD", "LAD", [[10, 0, 0], [10, 0, 10]])
+_vox = np.array([[1.0, 0, 5], [9.0, 0, 5]])
+_a0 = _tr.assign(_vox)
+_tr.vessels["lm"].excluded = True
+_a1 = _tr.assign(_vox)
+check("core: an excluded line takes no voxels (they go to the next line)",
+      [_a0["code_to_vid"][c] for c in _a0["code"]] == ["lm", "lad"]
+      and [_a1["code_to_vid"][c] for c in _a1["code"]] == ["lad", "lad"])
+_rt = _ct.CoronaryTree.from_json(_tr.to_json())
+check("core: Excl. saved in / loaded from .corotree.json",
+      _rt.vessels["lm"].excluded and not _rt.vessels["lad"].excluded)
+# CPR row: only 読込 / フォルダ更新 / 接続 (user 2026-11-19)
+from PyQt6.QtWidgets import QLabel as _QL, QPushButton as _QPB  # noqa: E402
+_cpr_lbl = next(w_ for w_ in dk.findChildren(_QL) if w_.text() == t("CPR："))
+_lay = None
+for _l in dk.widget().layout().children():
+    if any(_l.itemAt(i).widget() is _cpr_lbl for i in range(_l.count())):
+        _lay = _l
+_texts = [_l_.widget().text() for _l_ in
+          (_lay.itemAt(i) for i in range(_lay.count()))
+          if isinstance(_l_.widget(), _QPB)] if _lay else None
+check("CPR row: just Load / Folder / Connect",
+      _texts == [t("読込"), t("フォルダ更新"), t("接続")], _texts)
+# the list's right-click 削除 takes the whole Ctrl / Shift selection
+_b["tree"].add_root("y", "02", "LCX",
+                    _CL.from_points([[5, 0, 0], [5, 0, 20]], step_mm=0.5).points)
+_b["tree"].add_root("z", "03", "RCA",
+                    _CL.from_points([[9, 0, 0], [9, 0, 20]], step_mm=0.5).points)
+dk._populate()
+dk._tree_w.clearSelection()
+dk._item_for_vid("y").setSelected(True)
+dk._item_for_vid("z").setSelected(True)
+_real_q = QMessageBox.question
+QMessageBox.question = staticmethod(
+    lambda *a, **k: QMessageBox.StandardButton.Yes)
+_mtext = (Path(ctw.__file__).read_text(encoding="utf-8"))
+check("right-click 削除 → every selected line (the old 消去 job)",
+      "elif chosen is a_del:" in _mtext
+      and "self._delete_selected()" in
+      _mtext[_mtext.index("elif chosen is a_del:"):][:300])
+dk._delete_selected()
+QMessageBox.question = _real_q
+check("…both selected lines removed, the others kept",
+      "y" not in _b["tree"].vessels and "z" not in _b["tree"].vessels
+      and "x" in _b["tree"].vessels, list(_b["tree"].vessels))
 dk.hide()
 _ = QPoint
 
