@@ -370,13 +370,11 @@ seen = lh.__dict__.get("seen", [])
 grow = [b - a for a, b in zip(seen, seen[1:])]
 check("live: the line grows step by step (one point per refresh)",
       len(seen) >= 10 and max(grow) <= 1 and seen[-1] > 3, seen[:12])
-F0 = (np.eye(3)[0], np.eye(3)[2], -np.eye(3)[1])
-okv = all(np.linalg.norm(lh._pc["B"] - lh.views[-1][0]) < 1e-9
-          for _ in lh.views[-1:])
-check("live: the right pane only pans to the new point (never rotated)",
-      lh.views and okv and all(
-          all(np.allclose(fr[k], F0[k]) for k in range(3))
-          for (_, _, fr) in lh.views))
+okv = all(abs(abs(float(fr[0] @ (dc / np.linalg.norm(dc)))) - 1) < 1e-6
+          and np.linalg.norm(lh._pc["B"] - lh.views[-1][0]) < 1e-9
+          for (P_, dc, fr) in lh.views[-1:])
+check("live: the right pane follows the course, centred on the new point",
+      lh.views and okv)
 # 停止 mid-way: the trace so far is kept, no branches traced after it
 import multi_dicomviewer.ui.autotrack_progress as _atp  # noqa: E402
 _orig_c = _atp.AutoTrackProgress.cancelled
@@ -396,6 +394,62 @@ n_pts = len(sh_._measures["B"][0]["pts3d"])
 check("停止: stops at once, keeps the trace so far (one undo step)",
       rs is not None and rs["stop"] == "cancel" and 3 < n_pts < 20
       and len(sh_.undo) == 1 and not rs["branches"], (rs, n_pts))
+# 右クリックで停止: a right-click anywhere during Auto-Track stops it; other
+# clicks there are swallowed; the filter is gone afterwards
+from PyQt6.QtCore import QPointF  # noqa: E402
+from PyQt6.QtCore import QEvent as _QE  # noqa: E402
+from PyQt6.QtCore import Qt as _Qt  # noqa: E402
+from PyQt6.QtGui import QMouseEvent  # noqa: E402
+
+pane_w = QWidget()
+pane_w.resize(100, 100)
+pane_w.show()
+_got_left = []
+
+
+class _Spy(QWidget):
+    def mousePressEvent(self, e):                       # noqa: N802
+        _got_left.append(e.button())
+
+
+spy = _Spy()
+spy.resize(50, 50)
+spy.show()
+
+
+def _click(w, btn):
+    ev = QMouseEvent(_QE.Type.MouseButtonPress, QPointF(5, 5),
+                     QPointF(5, 5), btn, btn,
+                     _Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(w, ev)
+
+
+with _atp.AutoTrackProgress(None) as _pg:
+    _click(spy, _Qt.MouseButton.LeftButton)
+    c_left = _pg.cancelled()
+    _click(pane_w, _Qt.MouseButton.RightButton)
+    c_right = _pg.cancelled()
+_click(spy, _Qt.MouseButton.LeftButton)
+check("右クリックで停止: right-click stops; left clicks swallowed meanwhile",
+      not c_left and c_right and _got_left == [_Qt.MouseButton.LeftButton],
+      (c_left, c_right, _got_left))
+
+
+class RCHost(Host):
+    """a right-click arrives while the 6th step is being shown"""
+    def _refresh(self, *a, **k):
+        self.__dict__.setdefault("nref", 0)
+        self.nref += 1
+        if self.nref == 6:
+            _click(pane_w, _Qt.MouseButton.RightButton)
+
+
+rc_ = RCHost()
+rr_ = rc_._cpr_autotrack("B", 0)
+n_rc = len(rc_._measures["B"][0]["pts3d"])
+check("右クリックで停止 during a live Auto-Track: stops, keeps the trace",
+      rr_ is not None and rr_["stop"] == "cancel" and 3 < n_rc < 15,
+      (rr_ and rr_["stop"], n_rc))
 # every step = the section 3 mm ahead: edit points / sections 3 mm apart
 sp_ = np.linalg.norm(np.diff(extend_vessel(VY, D3, ctrl).trunk.path,
                              axis=0), axis=1)

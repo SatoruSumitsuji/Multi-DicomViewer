@@ -5,10 +5,38 @@ always shown in a dialog (also when nothing was found, with the reason)."""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtWidgets import (QApplication, QMessageBox, QProgressDialog,
+                             QWidget)
 
 from multi_dicomviewer.i18n import t
+
+
+class _RightClickStop(QObject):
+    """While Auto-Track runs: a right-click ANYWHERE (panes included) stops
+    it (user 2026-11-19); other clicks / wheel outside the progress window
+    are swallowed so the trace is not disturbed mid-way."""
+
+    _MOUSE = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+              QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel)
+
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+
+    def eventFilter(self, obj, ev):                      # noqa: N802
+        try:
+            if ev.type() not in self._MOUSE or not isinstance(obj, QWidget):
+                return False
+            dlg = self._owner._dlg
+            if dlg is not None and (obj is dlg or dlg.isAncestorOf(obj)):
+                return False                         # the 停止 button etc.
+            if (ev.type() == QEvent.Type.MouseButtonPress
+                    and ev.button() == Qt.MouseButton.RightButton):
+                self._owner._on_cancel()
+            return True
+        except Exception:                                # noqa: BLE001
+            return False
 
 
 class AutoTrackProgress:
@@ -20,13 +48,16 @@ class AutoTrackProgress:
         self._name = name
         self._dlg = None
         self._cancel = False
+        self._filter = None
 
     def __enter__(self):
         d = QProgressDialog(t("Auto-Track: 準備中…"), t("停止"), 0, 0,
                             self._parent)
         d.setWindowTitle(t("Auto-Track") + (f" — {self._name}"
                                             if self._name else ""))
-        d.setWindowModality(Qt.WindowModality.WindowModal)
+        # not modal: the right-click stop has to reach the panes (the
+        # filter below swallows every other click there meanwhile)
+        d.setWindowModality(Qt.WindowModality.NonModal)
         d.setMinimumDuration(0)
         d.setAutoClose(False)
         d.setAutoReset(False)
@@ -43,11 +74,19 @@ class AutoTrackProgress:
             pass
         QApplication.processEvents()
         self._dlg = d
+        app = QApplication.instance()
+        if app is not None:
+            self._filter = _RightClickStop(self)
+            app.installEventFilter(self._filter)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         return self
 
     def __exit__(self, *exc):
         QApplication.restoreOverrideCursor()
+        app = QApplication.instance()
+        if app is not None and self._filter is not None:
+            app.removeEventFilter(self._filter)
+        self._filter = None
         if self._dlg is not None:
             self._dlg.close()
             self._dlg.deleteLater()
@@ -72,7 +111,7 @@ class AutoTrackProgress:
         else:
             s = t("分枝 {k} / {n} を追跡中…（合計 {b:.0f} mm）", k=k, n=n,
                   b=total_mm)
-        self._dlg.setLabelText(s)
+        self._dlg.setLabelText(s + "\n" + t("右クリックで停止"))
         QApplication.processEvents()
 
 

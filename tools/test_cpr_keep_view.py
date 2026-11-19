@@ -2,7 +2,7 @@
 """The image the user is working on does not jump (user 2026-11-19).
 
 * confirming a CPR line keeps the map pane B's zoom / pan;
-* Auto-Track only PANS pane B to each new point (never rotates it);
+* Auto-Track: pane B follows each new point (turns with the course);
 * Resume trace after Auto-Track (right-click the distal point) keeps pane B
   where Auto-Track left it (it used to jump back to the proximal view the
   short-axis was built on) and brings pane A's MPR there too.
@@ -125,8 +125,9 @@ app.processEvents()
 tip = np.asarray(v._measures["B"][mi_of()]["pts3d"][-1], float)
 check("Auto-Track ran distally", out is not None and out["trunk_mm"] > 20,
       out and out["trunk_mm"])
-check("Auto-Track: pane B never rotated, centred on the distal point",
-      state_b()[3] == fr0 and np.linalg.norm(v._pc["B"] - tip) < 1e-6,
+check("Auto-Track: pane B follows the last edit point (turns with the "
+      "course, centred on the distal point)",
+      state_b()[3] != fr0 and np.linalg.norm(v._pc["B"] - tip) < 1e-6,
       (state_b()[3], fr0))
 # Resume trace from the distal point (the handle menu)
 s1 = state_b()

@@ -1774,6 +1774,7 @@
   "取消": "Deshacer",
   "古い EpiLv.json を変換しました（まだ保存していません）。Epi モードで各断面の線を確認・修正し、Calc Vol のあと保存してください。": "Se convirtió el EpiLv.json antiguo (todavía sin guardar). Revise y corrija la línea de cada plano en el modo Epi y guarde después de Calc Vol.",
   "右": "derecha",
+  "右クリックで停止": "Clic derecho para detener",
   "右上": "arriba a la derecha",
   "右下": "abajo a la derecha",
   "右画面のVR (立体表示) を表示/非表示": "Muestra/oculta el VR (vista 3D) de la pantalla derecha",

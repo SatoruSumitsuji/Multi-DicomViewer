@@ -592,6 +592,7 @@
   "取消": "Undo",
   "古い EpiLv.json を変換しました（まだ保存していません）。Epi モードで各断面の線を確認・修正し、Calc Vol のあと保存してください。": "The old EpiLv.json was converted (not saved yet). Check and correct the line on each plane in Epi mode, then save after Calc Vol.",
   "右": "right",
+  "右クリックで停止": "Right-click to stop",
   "右上": "upper right",
   "右下": "lower right",
   "右画面のVR (立体表示) を表示/非表示": "Show/hide the VR (3D view) in the right pane",
