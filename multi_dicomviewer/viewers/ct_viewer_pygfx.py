@@ -584,7 +584,13 @@ def _vr_render_image(p):
                 # Replace the tissue colour AND lift its opacity where territory
                 # is: the myocardium's own CTA opacity is low, so without this the
                 # territory colour barely shows (the "薄すぎて見えない" the user saw).
-                a = np.where(hit, np.maximum(a, terr_floor), a)
+                # Territory review (user 2026-11-20): ONLY the territory-
+                # coloured voxels are drawn. The crop is the whole Epi region,
+                # but the territory covers the compact myocardium only, so the
+                # trabeculae / PMT / low-HU spots left uncoloured showed through
+                # as a mottled tissue (skin) colour over the territory colours.
+                a = np.where(hit, np.maximum(a, terr_floor),
+                             0.0 if p.get("terr_only") else a)
                 cr = np.where(hit, tr[lab], cr)
                 cg = np.where(hit, tg[lab], cg)
                 cb = np.where(hit, tb[lab], cb)
@@ -6391,6 +6397,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "mask": self._vr_mask,
             "tvol": (None if lod else getattr(self, "_terr_mask_vol", None)),
             "tcols": getattr(self, "_terr_colors", None),
+            # Territory review: draw the territory colours only (no tissue)
+            "terr_only": bool(getattr(self, "_territory_display", False)),
         }
 
     def _vr_cpu_image(self, key, lod: bool = False):
