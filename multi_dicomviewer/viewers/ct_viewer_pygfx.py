@@ -2284,12 +2284,12 @@ class _Overlay(QWidget):
             p.drawPolyline(poly(_band))
 
         # LV Epi trace: the HU補正 band (± Settings → LV Epi HU補正範囲) around
-        # the Epi spline, faint green dotted — how far Epi HU補正 can move it.
+        # the Epi spline, orange dotted — how far Epi HU補正 can move it.
         _ebands = v._lv_epi_band_2d(key)
         if _ebands:
             # Thicker, more opaque dashes (the thin 1.2 px DotLine was hard to
             # see on the Mac) — on par with the Windows dashed band.
-            _pen = QPen(QColor(46, 139, 87, 230), 2.2)
+            _pen = QPen(QColor(255, 140, 0, 230), 2.2)   # orange (user 2026-11-20)
             _pen.setDashPattern([3.0, 2.5])
             _pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(_pen)

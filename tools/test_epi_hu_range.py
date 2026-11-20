@@ -196,5 +196,11 @@ for nm, cls in (("VTK", CTViewer), ("pygfx", GfxViewer)):
     h._lv["model"].epi_hu_done = True
     check(f"{nm}: after HU補正 → none", h._lv_epi_band_2d("B") == [])
 
+# the band is drawn orange (user 2026-11-20: the green looked like the Epi line)
+_vsrc = (Path(__file__).resolve().parents[1] / "multi_dicomviewer" / "viewers")
+check("band colour orange in both viewers",
+      "off_dash_cols.append((255, 140, 0, 200))" in (_vsrc / "ct_viewer.py").read_text(encoding="utf-8")
+      and "QPen(QColor(255, 140, 0, 230), 2.2)" in (_vsrc / "ct_viewer_pygfx.py").read_text(encoding="utf-8"))
+
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)

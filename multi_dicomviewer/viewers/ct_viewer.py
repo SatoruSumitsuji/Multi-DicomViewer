@@ -12125,11 +12125,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 draft_col = _hex_to_rgb(self._LV_VALVE_AUTO_COLOR)  # MV/AoV redraw
             handles += list(d["pts"])
         # LV Epi trace: the HU補正 band (± Settings → LV Epi HU補正範囲) around
-        # the Epi spline, faint green 点線 — how far Epi HU補正 can move it.
+        # the Epi spline, orange 点線 — how far Epi HU補正 can move it.
         for _bc in self._lv_epi_band_2d(key):
             for _q0, _q1 in zip(_bc, _bc[1:]):
                 off_dash_segs.append((_q0, _q1))
-                off_dash_cols.append((46, 139, 87, 150))
+                off_dash_cols.append((255, 140, 0, 200))   # orange (user 2026-11-20)
         # CPR map pane: Shift+drag rubber-band rectangle (cyan).
         _band = self._cpr_band_world_rect(key)
         if _band is not None:
