@@ -224,8 +224,8 @@ check("Mac Exit before tracing: in-place reset, view untouched",
       and "reset_cam" not in body and "_lv_apply_view_free()" in body)
 i = pg.find("_ebands = v._lv_epi_band_2d(key)")
 seg = pg[i:i + 700]
-check("Mac Epi band: thicker + more opaque dashes",
-      "QColor(46, 139, 87, 230), 2.2)" in seg and "PenStyle.DotLine" not in seg)
+check("Mac Epi band: thicker + more opaque dashes (orange)",
+      "QColor(255, 140, 0, 230), 2.2)" in seg and "PenStyle.DotLine" not in seg)
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)
