@@ -1488,7 +1488,7 @@ class MainWindow(QMainWindow):
             t("Clear the image from every pane (same as each pane's ✕). "
               "The layout and the studies list are kept.")
         )
-        self._hide_btns_btn.setText(t("Hide/Show Pane Buttons"))
+        self._sync_chrome_buttons()
         self._hide_btns_btn.setHelpToolTip(t("Hide / show every pane's toolbars and title (hidden = the image is maximised, for presentation). Applies to all panes."))
         self._anon_btn.setText(t("Anonymous"))
         self._anon_btn.setHelpToolTip(t('Left-click: mask patient/case info on all on-screen displays (files unchanged).\nRight-click: choose which tags to anonymize (also used by Export (Anon DICOM)).'))
@@ -6583,7 +6583,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 3, 6, 3)
 
-        self._info_btn = FitButton(t("◀ Hide Studies&Tools"))
+        self._info_btn = FitButton(t("◀ Hide Info Tabs"))
         self._info_btn.setHelpToolTip(
             t("Show/hide the left Studies tree AND every shown Tools panel "
               "(Coronary Tree / Case Presentation) together")
@@ -6632,8 +6632,10 @@ class MainWindow(QMainWindow):
         self._pane_step_btn.clicked.connect(self._cycle_active_pane)
         self._pane_step_btn.setEnabled(getattr(self, "_layout_key", "1x1")
                                        == "1x1")
-        row.addSpacing(8)
-        row.addWidget(self._pane_step_btn)
+        # Removed from the top row (user 2026-11-22); still built (hidden) so
+        # the layout code that greys it out keeps working.
+        self._pane_step_btn.setParent(bar)
+        self._pane_step_btn.hide()
 
         # "Clear All": empty every pane at once (same as each pane's ✕). The
         # layout is kept; the studies list is untouched. The leading ✕ matches
@@ -6650,13 +6652,14 @@ class MainWindow(QMainWindow):
 
         row.addSpacing(12)
         # "Max Image" toggle (user 2026-11-22: one button instead of the old
-        # Hide Buttons / Show Buttons pair): checked = every pane stripped down
-        # to just the image for presentation. Applies to ALL panes at once.
-        self._hide_btns_btn = FitButton(t("Hide/Show Pane Buttons"))
-        self._hide_btns_btn.setCheckable(True)
+        # Hide Buttons / Show Buttons pair). Like the Info-tabs button its text
+        # says what a click does: 「ペイン内ボタンを隠す」 while shown,
+        # 「ペイン内ボタンを表示」 while hidden. Applies to ALL panes at once.
+        self._hide_btns_btn = FitButton(t("Hide Pane Buttons"))
         self._hide_btns_btn.setHelpToolTip(t("Hide / show every pane's toolbars and title (hidden = the image is maximised, for presentation). Applies to all panes."))
         self._hide_btns_btn.clicked.connect(
-            lambda on: self._set_chrome_hidden(bool(on)))
+            lambda: self._set_chrome_hidden(
+                not getattr(self, "_chrome_hidden", False)))
         row.addWidget(self._hide_btns_btn)
         self._sync_chrome_buttons()
 
@@ -6745,12 +6748,11 @@ class MainWindow(QMainWindow):
         self._sync_chrome_buttons()
 
     def _sync_chrome_buttons(self) -> None:
-        """Reflect the hidden state on the Hide/Show Pane Buttons toggle."""
+        """Show what the pane-buttons toggle will do next (hide / show)."""
         hidden = getattr(self, "_chrome_hidden", False)
         if hasattr(self, "_hide_btns_btn"):
-            self._hide_btns_btn.blockSignals(True)
-            self._hide_btns_btn.setChecked(bool(hidden))
-            self._hide_btns_btn.blockSignals(False)
+            self._hide_btns_btn.setText(
+                t("Show Pane Buttons") if hidden else t("Hide Pane Buttons"))
 
     def _chrome_left_docks(self) -> list:
         """Every dock widget currently in the LEFT Studies/Tools frame — the
@@ -6772,7 +6774,7 @@ class MainWindow(QMainWindow):
     def _update_info_btn_text(self) -> None:
         vis = any(d.isVisible() for d in self._chrome_left_docks())
         self._info_btn.setText(
-            t("◀ Hide Studies&Tools") if vis else t("Show Studies&Tools ▶"))
+            t("◀ Hide Info Tabs") if vis else t("Show Info Tabs ▶"))
 
     def _toggle_info(self, *_a) -> None:
         """Hide / show everything in the LEFT Studies/Tools frame together — the
@@ -9507,7 +9509,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText(t("◀ Hide Studies"))
+            self._update_info_btn_text()
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still won't shrink the central area below its own minimum.
         cap = max(300, self.width() - 120)
@@ -9521,7 +9523,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText(t("◀ Hide Studies"))
+            self._update_info_btn_text()
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still clamps to the central area's own minimum width.
         cap = max(dock.minimumWidth(), self.width() - 120)

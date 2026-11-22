@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Top rows tidied (user 2026-11-22):
-- Image top row: one 「ペイン内ボタンを隠す・表示」 toggle (was Hide / Show
-  Buttons), 「✕ すべての画像をクリア」, and 匿名化 moved here between that
+- Image top row: one pane-buttons toggle whose text says what a click does
+  (「ペイン内ボタンを隠す」 / 「ペイン内ボタンを表示」, was Hide / Show
+  Buttons); the left-most button reads 「◀ 情報タブを隠す」 / 「情報タブを表示 ▶」, 「✕ すべての画像をクリア」, and 匿名化 moved here between that
   toggle and DICOM情報.
 - Studies frame row: ツリー / サムネイル / 「✕ すべての症例・検査を削除」 only
   (匿名化, DICOM情報, ◀ / ▶ gone) + the 🖼 thumbnail-size slider
@@ -57,27 +58,32 @@ def row_widgets(widget):
 bar = w._hide_btns_btn.parentWidget()
 ws = row_widgets(bar)
 check("no Show Buttons button any more", not hasattr(w, "_show_btns_btn"))
-check("toggle text", w._hide_btns_btn._full_text == "ペイン内ボタンを隠す・表示",
+check("toggle text while shown", w._hide_btns_btn._full_text == "ペイン内ボタンを隠す",
       w._hide_btns_btn._full_text)
-check("toggle is checkable", w._hide_btns_btn.isCheckable())
+check("info-tabs button text", w._info_btn._full_text in (
+    "◀ 情報タブを隠す", "情報タブを表示 ▶"), w._info_btn._full_text)
 check("Clear All text", w._clear_all_btn._full_text == "✕ すべての画像をクリア",
       w._clear_all_btn._full_text)
 i_h, i_a, i_d = (ws.index(w._hide_btns_btn), ws.index(w._anon_btn),
                  ws.index(w._tags_btn))
 check("order: toggle → 匿名化 → DICOM情報", i_h < i_a < i_d and i_a == i_h + 1
       and i_d == i_a + 1, (i_h, i_a, i_d))
+check("「ペイン →」 not shown", not w._pane_step_btn.isVisible())
+check("no 「ペイン →」 button in the row", w._pane_step_btn not in ws)
 check("匿名化 text", w._anon_btn._full_text == "匿名化", w._anon_btn._full_text)
 
 # toggle hides / shows the pane chrome
 w._hide_btns_btn.click()
-check("toggle ON → panes' buttons hidden", w._chrome_hidden is True
-      and w._hide_btns_btn.isChecked())
+check("click → panes' buttons hidden, text 「ペイン内ボタンを表示」",
+      w._chrome_hidden is True
+      and w._hide_btns_btn._full_text == "ペイン内ボタンを表示")
 w._hide_btns_btn.click()
-check("toggle OFF → shown again", w._chrome_hidden is False
-      and not w._hide_btns_btn.isChecked())
+check("click again → shown, text 「ペイン内ボタンを隠す」",
+      w._chrome_hidden is False
+      and w._hide_btns_btn._full_text == "ペイン内ボタンを隠す")
 w._set_chrome_hidden(True)
 check("state set elsewhere is reflected on the toggle",
-      w._hide_btns_btn.isChecked())
+      w._hide_btns_btn._full_text == "ペイン内ボタンを表示")
 w._set_chrome_hidden(False)
 
 # Anonymous: button ↔ menu action ↔ state
@@ -116,7 +122,7 @@ w.hide()
 w._set_language("en")
 check("en: toggle / Clear / Anonymous / Delete labels",
       (w._hide_btns_btn._full_text, w._clear_all_btn._full_text, w._anon_btn._full_text,
-       sp.btn_delete_all._full_text) == ("Hide/Show Pane Buttons",
+       sp.btn_delete_all._full_text) == ("Hide Pane Buttons",
                                      "✕ Clear All Images", "Anonymous",
                                      "✕ Delete All Studies"),
       (w._hide_btns_btn._full_text, w._clear_all_btn._full_text, w._anon_btn._full_text,
