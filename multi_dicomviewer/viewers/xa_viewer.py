@@ -997,8 +997,8 @@ class XAViewer(AbstractViewer):
         # the IVUS free drag-rotation) back to the originally-loaded orientation.
         self._reset_orient_btn = QPushButton(t("Reset"))
         self._reset_orient_btn.setToolTip(
-            t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
-              "back to the originally-loaded view"))
+            t("Reset: put the view back as it was loaded — zoom / pan, "
+              "Rt90°/Lt90°/Flip, free rotation, WB reverse and W/L"))
         self._reset_orient_btn.clicked.connect(self._reset_transform)
 
         # High-quality cine: keep frames bilinear-smooth even during playback
@@ -1512,12 +1512,19 @@ class XAViewer(AbstractViewer):
 
     def _reset_transform(self) -> None:
         """"Reset" button: undo every display transform — the 90°/flip
-        orientation AND the IVUS free drag-rotation — restoring the
+        orientation, the IVUS free drag-rotation, the zoom / pan, WB reverse
+        and the W/L — restoring the
         originally-loaded view. Applied to both canvases."""
         self._on_user_interaction()
         for c in (self.canvas, self.canvas2):
             c.reset_orient()
             c.set_free_rotation(0.0)
+            c.reset_zoom()          # zoom / pan back to the fit too (user 2026-11-22)
+        # ... and WB reverse + W/L back to the series' defaults (user 2026-11-22)
+        wb = getattr(self, "_wb_btn", None)
+        if wb is not None and wb.isChecked():
+            wb.setChecked(False)            # toggled → canvases un-invert
+        self._reset_wl()                    # no-op for a series without W/L
 
     def _toggle_hq_cine(self, on: bool) -> None:
         """High-quality cine toggle: smooth frames during playback on both
@@ -2861,8 +2868,8 @@ class XAViewer(AbstractViewer):
         if btn is not None:
             btn.setText(t("Reset"))
             btn.setToolTip(
-                t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
-                  "back to the originally-loaded view"))
+                t("Reset: put the view back as it was loaded — zoom / pan, "
+                  "Rt90°/Lt90°/Flip, free rotation, WB reverse and W/L"))
 
         # S-Cine / S-Zoom / Denoise. The OpenCV-unavailable note is appended
         # exactly as the constructor does when the codec is missing.

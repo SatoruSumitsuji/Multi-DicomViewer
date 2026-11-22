@@ -486,11 +486,35 @@ class ImageCanvas(QWidget):
             self._t_flip = not self._t_flip
         else:
             return
+        # Keep the zoom (user 2026-11-22, like WB reverse): the image point at
+        # the widget centre is carried through the rotation / flip and put
+        # back at the centre, so the same region stays magnified.
+        w, h = self._img_size
+        keep = (w > 0 and h > 0 and self._raw_frame8 is not None
+                and (self._zoom != 1.0 or self._pan != [0.0, 0.0]))
+        if keep:
+            cx, cy = self._widget_to_image_f(self.width() / 2.0,
+                                             self.height() / 2.0)
+            cx, cy, nw, nh = {
+                "rt90": (h - cy, cx, h, w),       # clockwise
+                "lt90": (cy, w - cx, h, w),
+                "fliph": (w - cx, cy, w, h),
+                "flipv": (cx, h - cy, w, h),
+            }[kind]
         self.clear_measurements()
-        self._zoom = 1.0
-        self._pan = [0.0, 0.0]
         if self._raw_frame8 is not None:
             self.set_frame(self._raw_frame8)
+        if keep:
+            cw, ch = self.width(), self.height()
+            scale = min(cw / nw, ch / nh) * self._zoom
+            self._pan = [cw / 2.0 - (cw - nw * scale) / 2.0 - cx * scale,
+                         ch / 2.0 - (ch - nh * scale) / 2.0 - cy * scale]
+            self._clamp_pan()
+            self.update()
+        else:
+            self._zoom = 1.0
+            self._pan = [0.0, 0.0]
+            self.update()
 
     def reset_orient(self) -> None:
         """Restore the native (un-rotated, un-flipped) orientation."""
