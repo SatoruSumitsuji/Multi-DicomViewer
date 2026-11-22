@@ -11,7 +11,8 @@ import time
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPolygon, QPolygonF
+from PyQt6.QtGui import (QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap,
+                         QPolygon, QPolygonF)
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -100,6 +101,42 @@ _SEEK_DOT_GREY = "#9a9a9a"
 _SEEK_QSS_DISABLED = _SEEK_QSS.replace(_SEEK_DOT_BLUE, _SEEK_DOT_GREY)
 _SEEK_QSS_COMPACT_DISABLED = _SEEK_QSS_COMPACT.replace(
     _SEEK_DOT_BLUE, _SEEK_DOT_GREY)
+
+
+def _magnifier_icon(px: int = 16) -> QIcon:
+    """The 🔍 magnifier as an icon with a real greyed-out (black & white, pale)
+    disabled look. As button TEXT the colour emoji stays coloured even when the
+    button is disabled, so a greyed-out 🔍+ / 🔍− / 🔍⬚ (mouse grid ON) was hard
+    to tell from an active one (user 2026-11-22)."""
+    sc = 3                                   # render big → crisp on HiDPI
+    img = QImage(px * sc, px * sc, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    f = QFont()
+    f.setPixelSize(int(px * sc * 0.85))
+    p.setFont(f)
+    p.drawText(img.rect(), int(Qt.AlignmentFlag.AlignCenter), "🔍")
+    p.end()
+    gray = img.convertToFormat(QImage.Format.Format_ARGB32)
+    for y in range(gray.height()):
+        for x in range(gray.width()):
+            c = gray.pixelColor(x, y)
+            a = c.alpha()
+            if a == 0:
+                continue
+            g = int(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            g = 150 + g * 80 // 255          # pale grey, like disabled text
+            gray.setPixelColor(x, y, QColor(g, g, g, a * 3 // 4))
+    icon = QIcon()
+    pm = QPixmap.fromImage(img)
+    pm.setDevicePixelRatio(sc)
+    icon.addPixmap(pm, QIcon.Mode.Normal)
+    pg = QPixmap.fromImage(gray)
+    pg.setDevicePixelRatio(sc)
+    icon.addPixmap(pg, QIcon.Mode.Disabled)
+    return icon
 
 
 class _RangeMarks(QWidget):
@@ -930,7 +967,11 @@ class XAViewer(AbstractViewer):
         # are sticky modes: after pressing one, each click on the image
         # zooms about that point (×1.1 / ×0.9). 🔍1 resets to the original
         # fit. Mutually exclusive with the measure tools.
-        self._zoom_in_btn = QPushButton("🔍+")
+        # The 🔍 is an ICON (not emoji text) so that it turns grey too when
+        # the button is greyed out (mouse grid ON).
+        _mag = _magnifier_icon()
+        self._zoom_in_btn = QPushButton("+")
+        self._zoom_in_btn.setIcon(_mag)
         self._zoom_in_btn.setCheckable(True)
         self._zoom_in_btn.setToolTip(
             t("Click-to-zoom IN — then click a point on the image to magnify "
@@ -939,12 +980,14 @@ class XAViewer(AbstractViewer):
         self._zoom_in_btn.clicked.connect(lambda: self._set_zoom_click("in"))
         row.addWidget(self._zoom_in_btn)
 
-        self._zoom_reset_btn = QPushButton("🔍1")
+        self._zoom_reset_btn = QPushButton("1")
+        self._zoom_reset_btn.setIcon(_mag)
         self._zoom_reset_btn.setToolTip(t("Reset zoom to the original fit"))
         self._zoom_reset_btn.clicked.connect(self._reset_zoom)
         row.addWidget(self._zoom_reset_btn)
 
-        self._zoom_out_btn = QPushButton("🔍−")
+        self._zoom_out_btn = QPushButton("−")
+        self._zoom_out_btn.setIcon(_mag)
         self._zoom_out_btn.setCheckable(True)
         self._zoom_out_btn.setToolTip(
             t("Click-to-zoom OUT — then click a point on the image to shrink "
@@ -956,7 +999,8 @@ class XAViewer(AbstractViewer):
         # Rubber-band zoom: drag a dotted rectangle over the image and that
         # region is magnified to fill the view. Sticky (each drag zooms);
         # mutually exclusive with click-to-zoom and the measure tools.
-        self._zoom_rect_btn = QPushButton("🔍⬚")
+        self._zoom_rect_btn = QPushButton("⬚")
+        self._zoom_rect_btn.setIcon(_mag)
         self._zoom_rect_btn.setCheckable(True)
         self._zoom_rect_btn.setToolTip(
             t("Drag-zoom — drag a rectangle over the image to magnify that "

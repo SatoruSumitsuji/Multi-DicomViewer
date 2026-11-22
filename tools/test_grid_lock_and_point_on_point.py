@@ -67,6 +67,16 @@ check("Measure OFF (grid back): greyed out again",
 v._grid_btn.setChecked(False)
 v._toggle_mouse_grid()
 check("grid OFF again: enabled", all(b.isEnabled() for b in locked))
+from PyQt6.QtGui import QIcon  # noqa: E402
+for b in (v._zoom_in_btn, v._zoom_out_btn, v._zoom_rect_btn):
+    pm = b.icon().pixmap(16, 16, QIcon.Mode.Disabled)
+    img = pm.toImage()
+    sat = max((img.pixelColor(x, y).hsvSaturation()
+               for x in range(img.width()) for y in range(img.height())
+               if img.pixelColor(x, y).alpha() > 40), default=-1)
+    check(f"{b.text()}: the 🔍 icon itself turns grey when greyed out",
+          not b.icon().isNull() and 0 <= sat < 20 and "🔍" not in b.text(),
+          sat)
 check("greyed-out style rule present",
       "QPushButton:disabled" in v.styleSheet())
 

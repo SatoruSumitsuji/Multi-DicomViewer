@@ -1315,6 +1315,38 @@ def _to_u8(arr: np.ndarray) -> np.ndarray:
     return np.clip(a, 0, 255).astype(np.uint8)
 
 
+def _palette_gray_lut(ds, first_arr) -> np.ndarray | None:
+    """Index → grey-level (0..255 float) table for a PALETTE COLOR dataset
+    that is effectively grayscale, else None. Decided ONCE per dataset (cached
+    on it) from the first decoded frame: every index that frame uses must be a
+    grey palette entry (R = G = B within 2/255). Unused colour entries do not
+    matter; should a later frame use one, it maps to that colour's luminance."""
+    cached = getattr(ds, "_mdv_palette_gray", "unset")
+    if not isinstance(cached, str):
+        return cached
+    lut = None
+    try:
+        a = np.asarray(first_arr)
+        if a.ndim == 2 and a.dtype == np.uint8:
+            idx = np.arange(256, dtype=np.uint8).reshape(1, 256)
+            rgb = np.asarray(apply_color_lut(idx, ds)).reshape(256, 3)
+            rgb = rgb.astype(np.float32)
+            if float(rgb.max()) > 255.0:                 # 16-bit palette
+                rgb = rgb / 257.0
+            grey = (rgb.max(axis=1) - rgb.min(axis=1)) <= 2.0
+            used = np.unique(a)
+            if bool(grey[used].all()):
+                lut = (0.299 * rgb[:, 0] + 0.587 * rgb[:, 1]
+                       + 0.114 * rgb[:, 2]).astype(np.float32)
+    except Exception:                                    # noqa: BLE001
+        lut = None
+    try:
+        object.__setattr__(ds, "_mdv_palette_gray", lut)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return lut
+
+
 def _decode_frame(ds, index: int, force_color: bool = False) -> np.ndarray:
     """One frame ready for display: grayscale -> 2-D float (window/level
     applied later by the viewer); color -> (H, W, 3) uint8 RGB, already
@@ -1326,6 +1358,16 @@ def _decode_frame(ds, index: int, force_color: bool = False) -> np.ndarray:
     otherwise forces to grayscale). It has no effect on a dataset that is
     not colour-capable — that still decodes to 2-D grayscale."""
     arr = _raw_frame(ds, index)
+    # A PALETTE COLOR image whose pixels only ever use the palette's GREY
+    # entries (e.g. Volcano IVUS exported as US with a Windows-style palette:
+    # a grey ramp + a few unused system colours) is really grayscale. Decode
+    # it as grey levels so W/L works (user 2026-11-22). The IVUS colour toggle
+    # (force_color) still gets the palette colours.
+    if not force_color and str(getattr(ds, "PhotometricInterpretation",
+                                       "")) == "PALETTE COLOR":
+        glut = _palette_gray_lut(ds, arr)
+        if glut is not None:
+            return glut[np.asarray(arr)].astype(np.float32)
     color = _is_color_ds(ds) or (force_color and _is_color_capable(ds))
     if not color:
         # IVUS encoded as YBR has the luminance in channel 0; pull THAT

@@ -1483,18 +1483,15 @@ class MainWindow(QMainWindow):
               "around from the last back to the first. Available only in the "
               "1×1 layout.")
         )
-        self._clear_all_btn.setText(t("✕ Clear All"))
+        self._clear_all_btn.setText(t("✕ Clear All Images"))
         self._clear_all_btn.setHelpToolTip(
             t("Clear the image from every pane (same as each pane's ✕). "
               "The layout and the studies list are kept.")
         )
-        self._hide_btns_btn.setText(t("Hide Buttons (Max Image)"))
-        self._hide_btns_btn.setHelpToolTip(
-            t("Hide every pane's toolbars/title to maximise the image "
-              "(for presentation). Use Show Buttons to bring them back.")
-        )
-        self._show_btns_btn.setText(t("Show Buttons"))
-        self._show_btns_btn.setHelpToolTip(t("Restore every pane's toolbars."))
+        self._hide_btns_btn.setText(t("Hide/Show Pane Buttons"))
+        self._hide_btns_btn.setHelpToolTip(t("Hide / show every pane's toolbars and title (hidden = the image is maximised, for presentation). Applies to all panes."))
+        self._anon_btn.setText(t("Anonymous"))
+        self._anon_btn.setHelpToolTip(t('Left-click: mask patient/case info on all on-screen displays (files unchanged).\nRight-click: choose which tags to anonymize (also used by Export (Anon DICOM)).'))
         self._tags_btn.setText(t("DICOM Info"))
         self._tags_btn.setHelpToolTip(
             t("Left-click: show/hide DICOM info on the image\n"
@@ -6642,7 +6639,7 @@ class MainWindow(QMainWindow):
         # layout is kept; the studies list is untouched. The leading ✕ matches
         # the per-pane close glyph and, because FitButton elides from the right,
         # stays visible (Clear's intent still readable) when the bar is narrow.
-        self._clear_all_btn = FitButton(t("✕ Clear All"))
+        self._clear_all_btn = FitButton(t("✕ Clear All Images"))
         self._clear_all_btn.setHelpToolTip(
             t("Clear the image from every pane (same as each pane's ✕). "
               "The layout and the studies list are kept.")
@@ -6652,23 +6649,31 @@ class MainWindow(QMainWindow):
         row.addWidget(self._clear_all_btn)
 
         row.addSpacing(12)
-        # "Max Image" toggle pair: Hide Buttons strips every pane down to just
-        # the image (and the title bar) for presentation; Show Buttons brings
-        # the toolbars back. Applies to ALL panes at once.
-        self._hide_btns_btn = FitButton(t("Hide Buttons (Max Image)"))
-        self._hide_btns_btn.setHelpToolTip(
-            t("Hide every pane's toolbars/title to maximise the image "
-              "(for presentation). Use Show Buttons to bring them back.")
-        )
-        self._hide_btns_btn.clicked.connect(lambda: self._set_chrome_hidden(True))
+        # "Max Image" toggle (user 2026-11-22: one button instead of the old
+        # Hide Buttons / Show Buttons pair): checked = every pane stripped down
+        # to just the image for presentation. Applies to ALL panes at once.
+        self._hide_btns_btn = FitButton(t("Hide/Show Pane Buttons"))
+        self._hide_btns_btn.setCheckable(True)
+        self._hide_btns_btn.setHelpToolTip(t("Hide / show every pane's toolbars and title (hidden = the image is maximised, for presentation). Applies to all panes."))
+        self._hide_btns_btn.clicked.connect(
+            lambda on: self._set_chrome_hidden(bool(on)))
         row.addWidget(self._hide_btns_btn)
-        self._show_btns_btn = FitButton(t("Show Buttons"))
-        self._show_btns_btn.setHelpToolTip(t("Restore every pane's toolbars."))
-        self._show_btns_btn.clicked.connect(
-            lambda: self._set_chrome_hidden(False)
-        )
-        row.addWidget(self._show_btns_btn)
         self._sync_chrome_buttons()
+
+        # "Anonymous" (moved here from the Studies frame, user 2026-11-22):
+        # left-click masks the case info on every display, right-click picks
+        # which tags are anonymized.
+        row.addSpacing(12)
+        self._anon_btn = FitButton(t("Anonymous"))
+        self._anon_btn.setCheckable(True)
+        self._anon_btn.setChecked(bool(getattr(self, "_anon", False)))
+        self._anon_btn.setHelpToolTip(t('Left-click: mask patient/case info on all on-screen displays (files unchanged).\nRight-click: choose which tags to anonymize (also used by Export (Anon DICOM)).'))
+        self._anon_btn.toggled.connect(self._set_anonymized)
+        self._anon_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._anon_btn.customContextMenuRequested.connect(
+            lambda _p: self._open_anon_settings())
+        row.addWidget(self._anon_btn)
 
         row.addSpacing(12)
         # Global DICOM-overlay controls (apply to every pane), so they live in
@@ -6740,11 +6745,12 @@ class MainWindow(QMainWindow):
         self._sync_chrome_buttons()
 
     def _sync_chrome_buttons(self) -> None:
-        """Enable only the button that does something in the current state."""
+        """Reflect the hidden state on the Hide/Show Pane Buttons toggle."""
         hidden = getattr(self, "_chrome_hidden", False)
         if hasattr(self, "_hide_btns_btn"):
-            self._hide_btns_btn.setEnabled(not hidden)
-            self._show_btns_btn.setEnabled(hidden)
+            self._hide_btns_btn.blockSignals(True)
+            self._hide_btns_btn.setChecked(bool(hidden))
+            self._hide_btns_btn.blockSignals(False)
 
     def _chrome_left_docks(self) -> list:
         """Every dock widget currently in the LEFT Studies/Tools frame — the
@@ -9232,6 +9238,11 @@ class MainWindow(QMainWindow):
         self._anon_act.blockSignals(True)
         self._anon_act.setChecked(on)
         self._anon_act.blockSignals(False)
+        ab = getattr(self, "_anon_btn", None)
+        if ab is not None:                  # top-row Anonymous button
+            ab.blockSignals(True)
+            ab.setChecked(on)
+            ab.blockSignals(False)
         self.browser.set_anonymized(on)  # also reflects its own button
         for v in self._tag_viewers():
             v.set_anonymized(on)

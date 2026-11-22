@@ -1427,7 +1427,7 @@ class StudyPanel(QWidget):
         self.thumb_size.setValue(self._thumb_px)
         self.thumb_size.setMinimumWidth(36)
         self.thumb_size.setMaximumWidth(140)
-        self.thumb_size.setToolTip(t("Thumbnail size"))
+        self.thumb_size.setToolTip(t("Resize the thumbnail icons"))
         self.thumb_size.valueChanged.connect(self._set_thumb_size)
 
         # Rebuild the thumbnail grid whenever the selected study changes.
@@ -1497,7 +1497,7 @@ class StudyPanel(QWidget):
         # shell confirms before acting. The leading ✕ matches the per-pane close
         # glyph and, because FitButton elides from the right, stays visible
         # (Delete's intent still readable) when the Studies dock is narrow.
-        self.btn_delete_all = FitButton(t("✕ Delete All"))
+        self.btn_delete_all = FitButton(t("✕ Delete All Studies"))
         self.btn_delete_all.setHelpToolTip(t(
             "Remove ALL studies/series from the list (the image files on disk "
             "are not deleted; reload the folder to restore them)"
@@ -1528,18 +1528,24 @@ class StudyPanel(QWidget):
                   self.btn_anon, self.btn_dicom, self.btn_delete_all):
             b.setMinimumWidth(0)
 
+        # Row (user 2026-11-22): Tree / Thumbnails / Delete All Studies, and
+        # the 🖼 thumbnail-size slider at the right. Anonymous moved to the
+        # shell's top row; DICOM Info is already there; ◀ / ▶ are dropped.
+        # Those widgets are still built (hidden) so the state syncs keep working.
         top = QHBoxLayout()
         top.setContentsMargins(2, 2, 2, 2)
         top.addWidget(self.btn_info)
         top.addWidget(self.btn_thumb)
-        top.addWidget(self.btn_anon)
-        top.addWidget(self.btn_dicom)
         top.addWidget(self.btn_delete_all)
-        top.addWidget(self.btn_dock_narrow)
-        top.addWidget(self.btn_dock_widen)
         top.addStretch(1)
-        top.addWidget(QLabel("🖼"))
+        self._thumb_size_icon = QLabel("🖼")
+        self._thumb_size_icon.setToolTip(t("Resize the thumbnail icons"))
+        top.addWidget(self._thumb_size_icon)
         top.addWidget(self.thumb_size)
+        for _w in (self.btn_anon, self.btn_dicom, self.btn_dock_narrow,
+                   self.btn_dock_widen):
+            _w.setParent(self)
+            _w.hide()
 
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
@@ -1592,7 +1598,7 @@ class StudyPanel(QWidget):
                 "Right-click: choose which tag data to show"
             ))
         if getattr(self, "btn_delete_all", None) is not None:
-            self.btn_delete_all.setText(t("✕ Delete All"))
+            self.btn_delete_all.setText(t("✕ Delete All Studies"))
             self.btn_delete_all.setHelpToolTip(t(
                 "Remove ALL studies/series from the list (the image files on "
                 "disk are not deleted; reload the folder to restore them)"
@@ -1602,7 +1608,9 @@ class StudyPanel(QWidget):
         if getattr(self, "btn_dock_widen", None) is not None:
             self.btn_dock_widen.setToolTip(t("Widen the tree pane"))
         if getattr(self, "thumb_size", None) is not None:
-            self.thumb_size.setToolTip(t("Thumbnail size"))
+            self.thumb_size.setToolTip(t("Resize the thumbnail icons"))
+        if getattr(self, "_thumb_size_icon", None) is not None:
+            self._thumb_size_icon.setToolTip(t("Resize the thumbnail icons"))
         self.update()
 
     def populate(self, patients: dict[str, Patient]) -> None:
