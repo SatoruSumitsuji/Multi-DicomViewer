@@ -1212,7 +1212,7 @@ class XAViewer(AbstractViewer):
         # No top/bottom padding — the default layout margins (≈11 px each on
         # macOS) otherwise opened a gap between the image and the seek bar.
         row.setContentsMargins(4, 0, 4, 0)
-        self.play_btn = QPushButton("▶ Play")
+        self.play_btn = QPushButton("▶ Play (D)")
         self.play_btn.setCheckable(True)
         self.play_btn.toggled.connect(self._toggle_play)
         # Play is the primary transport control, so it stays a touch larger
@@ -1232,6 +1232,11 @@ class XAViewer(AbstractViewer):
         # pull-back runs the other way, or to match a reversed CT short-axis.
         self.reverse_btn = QPushButton(t("Reverse"))
         self.reverse_btn.setCheckable(True)
+        # Coloured while Reverse is applied (user 2026-11-22) — the viewer's
+        # base button rule would otherwise flatten the checked look.
+        self.reverse_btn.setStyleSheet(
+            "QPushButton:checked { background:#1f77b4; color:white;"
+            " font-weight:bold; }")
         self.reverse_btn.setToolTip(t(
             "Reverse the play/scroll direction (distal↔proximal) — for "
             "IVUS/OCT where the pull-back runs the other way."))
@@ -2206,7 +2211,10 @@ class XAViewer(AbstractViewer):
                 self._planes[self._active]
             )
         n = max(p.volume.shape[0] for p in self._planes)
-        self.frame_lbl.setText(f"{self._frame + 1}/{n}")
+        # Reverse keeps the ORIGINAL frame numbers (user 2026-11-22): seek bar
+        # at the left end = frame n, right end = frame 1.
+        shown = (n - self._frame) if self._reversed else (self._frame + 1)
+        self.frame_lbl.setText(f"{shown}/{n}")
         # Keep the ECG cursor in step with the displayed frame.
         if self._ecg_visible and self._ecg_trace is not None:
             self._ecg_strip.set_cursor_fraction(self._ecg_fraction(self._frame))
@@ -2292,9 +2300,9 @@ class XAViewer(AbstractViewer):
             self.play_btn.blockSignals(True)
             self.play_btn.setChecked(False)
             self.play_btn.blockSignals(False)
-            self.play_btn.setText("▶ Play")
+            self.play_btn.setText("▶ Play (D)")
             return
-        self.play_btn.setText("⏸ Pause" if on else "▶ Play")
+        self.play_btn.setText("⏸ Pause (S)" if on else "▶ Play (D)")
         if on:
             if not self._play_resume and self._frame != self._range_start:
                 # Fresh play (not a resume after Pause): start from the
@@ -2974,7 +2982,7 @@ class XAViewer(AbstractViewer):
         # already in (read isChecked, never flip it).
         btn = getattr(self, "play_btn", None)
         if btn is not None:
-            btn.setText("⏸ Pause" if btn.isChecked() else "▶ Play")
+            btn.setText("⏸ Pause (S)" if btn.isChecked() else "▶ Play (D)")
         lbl = getattr(self, "frame_lbl", None)
         if lbl is not None:
             lbl.setToolTip(
