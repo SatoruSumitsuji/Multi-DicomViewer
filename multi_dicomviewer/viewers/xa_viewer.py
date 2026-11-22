@@ -681,7 +681,10 @@ class XAViewer(AbstractViewer):
             "QPushButton {"
             " text-align: left; padding: 3px 8px;"
             " border: 1px solid #c8c8c8; border-radius: 6px;"
-            " background: #ededed; color: #101010; }")
+            " background: #ededed; color: #101010; }"
+            # greyed out (e.g. the zoom / W/L modes while the mouse grid is on)
+            "QPushButton:disabled {"
+            " background: #f6f6f6; color: #a8a8a8; border-color: #dedede; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
@@ -723,6 +726,20 @@ class XAViewer(AbstractViewer):
         on = self._grid_btn.isChecked() and not self._meas_btn.isChecked()
         for _c in (self.canvas, self.canvas2):
             _c.set_grid_enabled(on)
+        # While the grid is in use (user 2026-11-22) the magnifier +/-/range
+        # and the drag Zoom / W/L modes are greyed out: the grid owns the left
+        # button, so those modes could not work anyway.
+        if on:
+            self._clear_zoom_click()
+            self._clear_zoom_rect()
+            self._clear_drag_modes()
+        for b in self._grid_locked_btns():
+            b.setEnabled(not on)
+
+    def _grid_locked_btns(self):
+        return [b for b in (getattr(self, n, None) for n in (
+            "_zoom_in_btn", "_zoom_out_btn", "_zoom_rect_btn",
+            "_drag_zoom_btn", "_drag_wl_btn")) if b is not None]
 
     def reload_mouse_grid(self) -> None:
         """Re-read the grid prefs (Settings ▸ layout change); keep the persisted

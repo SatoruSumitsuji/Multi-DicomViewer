@@ -204,6 +204,9 @@ class ImageCanvas(QWidget):
         self._meas_seq = 0
         self._draft: dict | None = None    # {type, pts}
         self._edit: dict | None = None     # {mi, vi}
+        # A press on an existing edit point while a measure tool is armed: a
+        # DRAG re-edits that point, a plain CLICK places a NEW point there.
+        self._edit_pending: dict | None = None
         self._hover: tuple[float, float] | None = None
         # Compare (%PA + radial Thickness gap between two Ellipse/Polygon),
         # same flow as the CT viewers: arm with the Compare button, click two
@@ -508,6 +511,7 @@ class ImageCanvas(QWidget):
         self.measures.clear()
         self._draft = None
         self._edit = None
+        self._edit_pending = None
         self._hover = None
         self._compares.clear()
         self._cmp_sel = []
@@ -619,6 +623,7 @@ class ImageCanvas(QWidget):
         self.meas_type = t if t in _TOOLS else ""
         self._draft = None
         self._edit = None
+        self._edit_pending = None
         self._hover = None
         # Hover preview (and thus move-event tracking) is only needed while a
         # drawing tool is active; off otherwise so idle/playback mouse motion
@@ -1608,9 +1613,16 @@ class ImageCanvas(QWidget):
             return
 
         # Handle drag has priority — even when a tool is selected, so the
-        # user can re-edit a previous shape.
+        # user can re-edit a previous shape. With a tool armed (user
+        # 2026-11-22) the press is decided on release: a drag (> 4 px) moves
+        # the old point, a plain click places a NEW point on top of it, so a
+        # new measurement can start / pass on an old edit point.
         hit = self._pick_handle(sx, sy)
         if hit is not None:
+            if self.meas_type:
+                self._edit_pending = {"mi": hit[0], "vi": hit[1],
+                                      "sx": sx, "sy": sy}
+                return
             self._edit = {"mi": hit[0], "vi": hit[1]}
             self.update()                       # turn the handle green now
             return
@@ -1647,6 +1659,11 @@ class ImageCanvas(QWidget):
                 self._free_rot_drag = self._free_rot_angle(sx, sy)
                 return
 
+        self._add_draft_point(sx, sy)
+
+    def _add_draft_point(self, sx, sy):
+        """Add one point of the armed measure tool at widget (sx, sy);
+        commits the shape once it has all its points."""
         if not self.meas_type:
             return
         pt = self._widget_to_image(QPoint(int(sx), int(sy)))
@@ -1751,6 +1768,12 @@ class ImageCanvas(QWidget):
                 )
             self.update()
             return
+        if self._edit_pending is not None:
+            p = self._edit_pending
+            if math.hypot(sx - p["sx"], sy - p["sy"]) <= 4.0:
+                return                          # still a click
+            self._edit_pending = None           # moved → re-edit the old point
+            self._edit = {"mi": p["mi"], "vi": p["vi"]}
         if self._edit is not None:
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is None:
@@ -1826,6 +1849,11 @@ class ImageCanvas(QWidget):
                 else Qt.CursorShape.ArrowCursor
             )
             self.update()
+            return
+        if self._edit_pending is not None:      # click on an old point = new
+            p = self._edit_pending
+            self._edit_pending = None
+            self._add_draft_point(p["sx"], p["sy"])
             return
         if self._edit is not None:
             self._edit = None
