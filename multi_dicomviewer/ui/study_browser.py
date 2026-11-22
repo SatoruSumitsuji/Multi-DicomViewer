@@ -30,6 +30,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QStyle,
+    QStyleOptionButton,
     QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -124,7 +126,15 @@ class FitButton(QPushButton):
         """Tooltip shown when the label fits (and appended after the full
         label when it is elided)."""
         self._help_tip = tip
+        super().setToolTip(tip)      # usable at once, before any layout pass
         self._relayout_text()
+
+    def setToolTip(self, tip: str) -> None:  # noqa: N802 (Qt override)
+        # A plain setToolTip used to be overwritten by the next re-fit (the
+        # fit path resets the tooltip to the help text, "" by default), so
+        # the hover text came and went with the dock width. Route it through
+        # the help text instead.
+        self.setHelpToolTip(tip)
 
     def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
         self._full_text = text
@@ -142,6 +152,9 @@ class FitButton(QPushButton):
         # show — leaving a stale "Lo…" label until something else nudges it.
         super().showEvent(e)
         self._relayout_text()
+        # ... and once more after the surrounding layout has settled (the
+        # first show of the Studies dock resizes it right after this event).
+        QTimer.singleShot(0, self._relayout_text)
 
     def refit(self) -> None:
         """Re-run the elide against the CURRENT width. Call after a container's
@@ -154,9 +167,23 @@ class FitButton(QPushButton):
         Qt's own size hint so it is correct on every platform (macOS rounds /
         pads wider than Windows). It is constant for any text, so it can be
         read off whatever text is current."""
+        # From the style's CONTENTS size (not QPushButton.sizeHint): the
+        # push-button hint carries a minimum width (~75 px on Windows), so
+        # once the label had been elided to its first char the "chrome" read
+        # as that whole minimum — the label then never grew back even when
+        # the dock was wide enough (user 2026-11-22: blank / 「📋」 buttons
+        # until the Studies frame was resized).
         fm = self.fontMetrics()
-        return max(0, super().sizeHint().width()
-                   - fm.horizontalAdvance(super().text()))
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        tw = fm.horizontalAdvance(self._full_text or " ")
+        th = fm.height()
+        tw_i = tw
+        if not self.icon().isNull():
+            tw_i = tw + self.iconSize().width() + 4
+        full = self.style().sizeFromContents(
+            QStyle.ContentsType.CT_PushButton, opt, QSize(tw_i, th), self)
+        return max(0, full.width() - tw)
 
     def sizeHint(self):  # noqa: N802 (Qt override)
         # Always hint for the FULL label, never the (possibly elided) text on
@@ -164,11 +191,16 @@ class FitButton(QPushButton):
         # button → it elided more … collapsing macOS buttons to just the icon
         # even when the dock was wide. setMinimumWidth(0) still lets the layout
         # squeeze the button below this hint when space is genuinely tight.
+        # Built from the full label + the style chrome (see _chrome_px): the
+        # old "QPushButton hint + (full − shown)" under-counted once the shown
+        # label was elided below the push-button minimum width, so the layout
+        # never gave the button its full width back.
         hint = super().sizeHint()
         fm = self.fontMetrics()
-        hint.setWidth(hint.width() + max(
-            0, fm.horizontalAdvance(self._full_text)
-            - fm.horizontalAdvance(super().text())))
+        hint.setWidth(max(hint.width() if super().text() == self._full_text
+                          else 0,
+                          self._chrome_px()
+                          + fm.horizontalAdvance(self._full_text)))
         return hint
 
     def _relayout_text(self) -> None:
@@ -1447,7 +1479,8 @@ class StudyPanel(QWidget):
         # Right-click the Thumbnail button → "min size × 10 across" layout
         # (re-applicable any time; the first switch to thumbnails does it
         # automatically too).
-        self.btn_thumb.setToolTip(t(
+        self.btn_info.setHelpToolTip(t("Tree view of the studies / series"))
+        self.btn_thumb.setHelpToolTip(t(
             "Left-click: thumbnail view (starts at min size × 10 across).\n"
             "Right-click: re-apply the min size × 10 across layout."
         ))
@@ -1537,11 +1570,16 @@ class StudyPanel(QWidget):
         top.addWidget(self.btn_info)
         top.addWidget(self.btn_thumb)
         top.addWidget(self.btn_delete_all)
-        top.addStretch(1)
+        top.addSpacing(6)
         self._thumb_size_icon = QLabel("🖼")
         self._thumb_size_icon.setToolTip(t("Resize the thumbnail icons"))
         top.addWidget(self._thumb_size_icon)
-        top.addWidget(self.thumb_size)
+        # The slider only takes the room the three buttons leave over (its
+        # size hint is ignored), so the button labels are shown in full first.
+        self.thumb_size.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                      self.thumb_size.sizePolicy().verticalPolicy())
+        top.addWidget(self.thumb_size, 1)
+        top.addStretch(0)
         for _w in (self.btn_anon, self.btn_dicom, self.btn_dock_narrow,
                    self.btn_dock_widen):
             _w.setParent(self)
@@ -1580,7 +1618,9 @@ class StudyPanel(QWidget):
             self.btn_info.setText(t("📋 Tree"))
         if getattr(self, "btn_thumb", None) is not None:
             self.btn_thumb.setText(t("🖼 Thumbnails"))
-            self.btn_thumb.setToolTip(t(
+            self.btn_info.setHelpToolTip(
+                t("Tree view of the studies / series"))
+            self.btn_thumb.setHelpToolTip(t(
                 "Left-click: thumbnail view (starts at min size × 10 across).\n"
                 "Right-click: re-apply the min size × 10 across layout."
             ))

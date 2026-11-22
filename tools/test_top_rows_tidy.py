@@ -4,7 +4,7 @@
   (「ペイン内ボタンを隠す」 / 「ペイン内ボタンを表示」, was Hide / Show
   Buttons); the left-most button reads 「◀ 情報タブを隠す」 / 「情報タブを表示 ▶」, 「✕ すべての画像をクリア」, and 匿名化 moved here between that
   toggle and DICOM情報.
-- Studies frame row: ツリー / サムネイル / 「✕ すべての症例・検査を削除」 only
+- Studies frame row: ツリー / サムネイル / 「✕ 全症例・検査削除」 only
   (匿名化, DICOM情報, ◀ / ▶ gone) + the 🖼 thumbnail-size slider
   (hover: サムネイルアイコンのサイズ変更).
 
@@ -103,7 +103,7 @@ check("studies row = ツリー / サムネイル / 削除 + 🖼 size slider",
       top_ws == [sp.btn_info, sp.btn_thumb, sp.btn_delete_all,
                  sp._thumb_size_icon, sp.thumb_size],
       [b.text() for b in top_ws if hasattr(b, "text")])
-check("Delete All text", sp.btn_delete_all._full_text == "✕ すべての症例・検査を削除",
+check("Delete All text", sp.btn_delete_all._full_text == "✕ 全症例・検査削除",
       sp.btn_delete_all._full_text)
 w.show()
 app.processEvents()
@@ -116,6 +116,45 @@ check("hover text on 🖼 and the slider",
       sp.thumb_size.toolTip() == "サムネイルアイコンのサイズ変更"
       and sp._thumb_size_icon.toolTip() == "サムネイルアイコンのサイズ変更",
       sp.thumb_size.toolTip())
+w.hide()
+
+# first display: the labels are shown in full and the hover texts exist
+# without touching the Studies frame (a label elided once used to stay
+# elided / the hover text only appeared after resizing the frame).
+from PyQt6.QtCore import QTimer  # noqa: E402
+from multi_dicomviewer.ui.study_browser import FitButton  # noqa: E402
+from PyQt6.QtCore import Qt  # noqa: E402
+w.resize(1600, 900)
+w.show()
+for _ in range(5):
+    app.processEvents()
+# room for all three labels (offscreen fonts are wider than Windows')
+need = sum(b.sizeHint().width() for b in (sp.btn_info, sp.btn_thumb,
+                                          sp.btn_delete_all)) + 140
+w.resizeDocks([w._studies_dock], [need], Qt.Orientation.Horizontal)
+for _ in range(5):
+    app.processEvents()
+for b in (sp.btn_info, sp.btn_thumb, sp.btn_delete_all):
+    check(f"first display: {b._full_text} shown in full",
+          b.text() == b._full_text, (b.width(), b.text()))
+    check(f"first display: {b._full_text} has a hover text", bool(b.toolTip()))
+fb = FitButton("📋 ツリーツリー")
+fb.setHelpToolTip("help")
+fb.resize(30, 24)
+fb.show()
+app.processEvents()
+squeezed = fb.text()
+fb.resize(fb.sizeHint().width(), 24)
+app.processEvents()
+check("an elided label grows back once the button is wide enough",
+      squeezed != fb._full_text and fb.text() == fb._full_text,
+      (squeezed, fb.text()))
+fb.setToolTip("plain tooltip")
+fb.resize(fb.sizeHint().width() + 10, 24)
+app.processEvents()
+check("a plain setToolTip survives a re-fit", fb.toolTip() == "plain tooltip",
+      fb.toolTip())
+fb.hide()
 w.hide()
 
 # live language switch keeps the new labels
