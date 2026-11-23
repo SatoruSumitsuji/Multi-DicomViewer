@@ -15,6 +15,7 @@ from PyQt6.QtGui import (
     QFont,
     QIcon,
     QImage,
+    QPainter,
     QPixmap,
 )
 from PyQt6.QtWidgets import (
@@ -78,6 +79,41 @@ def _popup_parent(widget):
     dock itself while floating — both top-level) is both correct and silent.
     """
     return widget.window()
+
+
+def _emoji_icon(ch: str, px: int = 16) -> QIcon:
+    """A colour emoji as an icon whose DISABLED mode is a real pale grey (as
+    text / a QLabel the colour emoji stays coloured when greyed out). Same
+    look as the XA 🔍 icon (viewers/xa_viewer._magnifier_icon)."""
+    sc = 3                                   # render big → crisp on HiDPI
+    img = QImage(px * sc, px * sc, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    f = QFont()
+    f.setPixelSize(int(px * sc * 0.85))
+    p.setFont(f)
+    p.drawText(img.rect(), int(Qt.AlignmentFlag.AlignCenter), ch)
+    p.end()
+    gray = img.convertToFormat(QImage.Format.Format_ARGB32)
+    for y in range(gray.height()):
+        for x in range(gray.width()):
+            c = gray.pixelColor(x, y)
+            a = c.alpha()
+            if a == 0:
+                continue
+            g = int(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            g = 150 + g * 80 // 255          # pale grey, like disabled text
+            gray.setPixelColor(x, y, QColor(g, g, g, a * 3 // 4))
+    icon = QIcon()
+    pm = QPixmap.fromImage(img)
+    pm.setDevicePixelRatio(sc)
+    icon.addPixmap(pm, QIcon.Mode.Normal)
+    pg = QPixmap.fromImage(gray)
+    pg.setDevicePixelRatio(sc)
+    icon.addPixmap(pg, QIcon.Mode.Disabled)
+    return icon
 
 
 class FitButton(QPushButton):
@@ -1571,7 +1607,8 @@ class StudyPanel(QWidget):
         top.addWidget(self.btn_thumb)
         top.addWidget(self.btn_delete_all)
         top.addSpacing(6)
-        self._thumb_size_icon = QLabel("🖼")
+        self._thumb_size_icon = QLabel()
+        self._thumb_size_qicon = _emoji_icon("🖼", 16)
         self._thumb_size_icon.setToolTip(t("Resize the thumbnail icons"))
         top.addWidget(self._thumb_size_icon)
         # The slider only takes the room the three buttons leave over (its
@@ -1594,6 +1631,7 @@ class StudyPanel(QWidget):
         # With no constraint the toolbar just clips when the dock is
         # dragged narrow (see minimumSizeHint below).
         col.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._sync_thumb_size_enabled()
 
     def minimumSizeHint(self) -> QSize:
         """Allow the Studies dock to shrink to about one minimum-size
@@ -1919,11 +1957,24 @@ class StudyPanel(QWidget):
         self._stack.setCurrentIndex(idx)
         self.btn_info.setChecked(idx == 0)
         self.btn_thumb.setChecked(idx == 1)
+        self._sync_thumb_size_enabled()
         # First time we ever show the thumbnail view: start at min × 10 across
         # (the user's "scan for missing series" default).
         if idx == 1 and not self._thumb_fit_done:
             self._thumb_fit_done = True
             self._apply_thumb_fit()
+
+    def _sync_thumb_size_enabled(self) -> None:
+        """The 🖼 size slider only means something in the Thumbnail view: in
+        the Tree view it is disabled (grey, not draggable) and its 🖼 icon is
+        shown in grey (user 2026-11-23)."""
+        on = self._stack.currentIndex() == 1
+        self.thumb_size.setEnabled(on)
+        lab = getattr(self, "_thumb_size_icon", None)
+        if lab is not None:
+            lab.setEnabled(on)
+            mode = QIcon.Mode.Normal if on else QIcon.Mode.Disabled
+            lab.setPixmap(self._thumb_size_qicon.pixmap(QSize(16, 16), mode))
 
     def _resort_thumbs(self) -> None:
         """Rebuild tree + thumbnails after a header-sort change and keep the
