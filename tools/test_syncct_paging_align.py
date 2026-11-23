@@ -43,10 +43,10 @@ def check(name, ok, info=""):
         fails.append(name)
 
 
-def mk(uid):
-    vol = np.full((60, 64, 64), -100.0, np.float32)
-    s = LoadedSeries(modality=Modality.CT, volume=vol, spacing_mm=(0.7, 0.7),
-                     cine_fps=None, window=800.0, level=200.0, slice_mm=1.5,
+def mk(uid, shape=(60, 64, 64), px=0.7, sl=1.5):
+    vol = np.full(shape, -100.0, np.float32)
+    s = LoadedSeries(modality=Modality.CT, volume=vol, spacing_mm=(px, px),
+                     cine_fps=None, window=800.0, level=200.0, slice_mm=sl,
                      patient_basis=None, series_uid=uid)
     v = CTViewer()
     v.resize(1200, 700)
@@ -226,10 +226,8 @@ for lvv in (None, {}):
         da, db = depth(a) - da0, depth(b) - db0
         tag = "LV analysis open" if lvv is not None else "no LV analysis"
         check(f"Rt / MV-AoV / mm, {tag}: {name} pages the shown pane on both",
-              abs(da) > 0.3 and abs(db) > 0.3 and abs(da - db) < 0.05
-              if lvv is None else abs(da) > 0.3 and abs(db) > 0.3,
-              (round(da, 2), round(db, 2)))
-        if lvv is not None:
+              abs(da) > 0.3 and abs(db) > 0.3, (round(da, 2), round(db, 2)))
+        if True:   # short-axis pane → matched by the LEVEL (with or w/o LV)
             # LV analysis: matched by mm along each long axis, from MV-AoV
             ra = a.lv_cosync_level_mm() - float(
                 (mv_a - a._lv_cosync_axis()[0]) @ a._lv_cosync_axis()[1])
@@ -255,6 +253,165 @@ check("2-D: slice = the Apex slice",
       a._slice2d == int(round(apex_a[2] / a._dims[2]))
       and b._slice2d == int(round(apex_b[2] / b._dims[2])),
       (a._slice2d, b._slice2d))
+
+# 2-D edge: b reaches its last slice first; paging back re-aligns the pair
+link = sv.SyncViewLink(a, b)
+a._slice2d = 5
+a._page2d(0)
+b._slice2d = int(b._image.GetDimensions()[2]) - 3
+b._page2d(0)
+a0, b0 = a._slice2d, b._slice2d
+for _ in range(6):
+    a._page2d(1)
+app.processEvents()
+check("2-D edge: the peer stops at its last slice",
+      b._slice2d == int(b._image.GetDimensions()[2]) - 1 and a._slice2d == a0 + 6,
+      (a._slice2d, b._slice2d))
+for _ in range(8):
+    a._page2d(-1)
+app.processEvents()
+check("2-D edge: aligned again after paging back",
+      a._slice2d - a0 == b._slice2d - b0 == -2, (a._slice2d - a0, b._slice2d - b0))
+link.teardown()
+
+# ------------------------------- different voxel sizes: no drift (2026-11-23)
+# The two CTs page by the SAME mm (the old pixel / notch replay moved each by
+# its own voxel size, so they drifted apart over use).
+c = mk("c", shape=(60, 64, 64), px=0.7, sl=1.5)
+d = mk("d", shape=(90, 80, 80), px=0.5, sl=1.0)
+app.processEvents()
+for v in (c, d):
+    v._set_mode("3D")
+    v._lv_apex = None
+    v._lv_valves = {"mitral": None, "aortic": None}
+app.processEvents()
+
+
+MID = {id(v): np.asarray(v._center, float).copy() for v in (c, d)}
+
+
+def mid(v):
+    p = MID[id(v)].copy()                     # the volume centre (as loaded)
+    v._center = p.copy()
+    v._pc = {"A": p.copy(), "B": p.copy()}
+
+
+def updepth(v, k):
+    return float(np.asarray(v._center, float) @ v._sync_page_up(k))
+
+
+for v in (c, d):
+    mid(v)
+link = sv.SyncViewLink(c, d)
+for k in ("A", "B"):
+    c0, d0 = updepth(c, k), updepth(d, k)
+    for step in range(6):                      # back and forth, drag + wheel
+        c._drag(k, 0, -12 if step % 2 == 0 else 7, tool="PAGING")
+        c._wheel(k, 1 if step % 3 else -1)
+    app.processEvents()
+    dc, dd = updepth(c, k) - c0, updepth(d, k) - d0
+    check(f"different voxels, no LV axis, pane {k}: same mm after repeated "
+          f"drag / wheel", abs(dc) > 1 and abs(dc - dd) < 1e-6,
+          (round(dc, 3), round(dd, 3)))
+link.teardown()
+
+# with the LV axis: short-axis-like pane → level (mm / 按分), the long-axis
+# pane → real mm
+for v, apex, mvp in ((c, (22.0, 22.0, 15.0), (22.0, 22.0, 75.0)),
+                     (d, (20.0, 20.0, 20.0), (20.0, 20.0, 70.0))):
+    v._lv_apex = np.array(apex)
+    v._lv_valves = {"mitral": (np.array(mvp),), "aortic": None}
+    ex, ey, ez = np.eye(3)
+    v._frame["A"] = (ex, ey, ez)              # A = short axis (⟂ z = axis)
+    v._frame["B"] = (ex, ez, -ey)             # B = long axis
+    mid(v)
+link = sv.SyncViewLink(c, d)
+for frac in (False, True):
+    link.set_level_fraction(frac)
+    for step in range(6):
+        c._drag("A", 0, -10 if step % 2 == 0 else 6, tool="PAGING")
+        c._wheel("A", 1 if step % 3 else -1)
+    app.processEvents()
+    if frac:
+        got = (c.lv_cosync_level_fraction(), d.lv_cosync_level_fraction())
+    else:
+        got = (c.lv_cosync_level_mm(), d.lv_cosync_level_mm())
+    check(f"different voxels, short axis, {'按分' if frac else 'mm'}: "
+          f"levels still equal after repeated paging",
+          abs(got[0] - got[1]) < 1e-6, got)
+c0, d0 = updepth(c, "B"), updepth(d, "B")
+for step in range(4):
+    c._drag("B", 0, -9 if step % 2 == 0 else 4, tool="PAGING")
+app.processEvents()
+dc, dd = updepth(c, "B") - c0, updepth(d, "B") - d0
+check("different voxels, long-axis pane: same mm",
+      abs(dc) > 1 and abs(dc - dd) < 1e-6, (round(dc, 3), round(dd, 3)))
+
+# volume edge: the peer hits its edge first (d is smaller along B's normal);
+# after paging back, the pair is aligned again (no lasting offset)
+for v in (c, d):
+    mid(v)
+link.set_level_fraction(False)
+c0, d0 = updepth(c, "B"), updepth(d, "B")
+d_ref = d._center.copy()
+for _ in range(3):
+    c._drag("B", 0, -10, tool="PAGING")        # 3 x 7 mm = 21 mm
+app.processEvents()
+dc, dd = updepth(c, "B") - c0, updepth(d, "B") - d0
+check("volume edge: the peer stops at its edge", abs(dd) < abs(dc) - 0.5,
+      (round(dc, 3), round(dd, 3)))
+check("volume edge: the peer stays on the paging line (no in-plane slide)",
+      np.allclose(np.cross(d._center - d_ref, d._sync_page_up("B")), 0,
+                  atol=1e-6), (d._center, d_ref))
+for _ in range(5):
+    c._drag("B", 0, 8, tool="PAGING")          # back past the start
+app.processEvents()
+dc, dd = updepth(c, "B") - c0, updepth(d, "B") - d0
+check("volume edge: aligned again after paging back",
+      abs(dc) > 1 and abs(dc - dd) < 1e-6, (round(dc, 3), round(dd, 3)))
+d.sync_center_on(d._center)
+check("volume edge: a fresh alignment clears the debt",
+      not d._sync_pg_debt)
+
+# double-click recentre is mirrored (same in-plane move, image recentred)
+for v in (c, d):
+    mid(v)
+cc0, dc0 = c._center.copy(), d._center.copy()
+cw, ch = c.pane["A"].canvas.width(), c.pane["A"].canvas.height()
+c._gesture_moved = False
+c._recenter("A", cw * 0.5 + 40, ch * 0.5 - 25)
+app.processEvents()
+mvc, mvd = c._center - cc0, d._center - dc0
+check("double-click recentre: the peer centre moves the same way",
+      float(np.linalg.norm(mvc)) > 1
+      and np.allclose(mvc, mvd, atol=1e-6), (mvc, mvd))
+check("double-click recentre: the peer image is recentred on it",
+      all(np.allclose(d._pc[k], d._center, atol=1e-6) for k in ("A", "B")))
+
+# SyncCT bar 位置合わせ: redo the alignment without leaving SyncCT
+from multi_dicomviewer.ui.main_window import MainWindow as _MW  # noqa: E402
+
+
+class _Shell:
+    _syncview_link = link
+    synced = []
+
+    def _sv_ask_start_mode(self, pts):
+        return "apex"
+
+    def _sv_sync_bar_state(self):
+        self.synced.append(1)
+
+
+link.set_level_fraction(True)
+_MW._sv_realign(_Shell())
+app.processEvents()
+check("位置合わせ: both CTs centred on their Apex point, SyncCT kept",
+      np.allclose(c._center, c._lv_apex) and np.allclose(d._center, d._lv_apex)
+      and link.viewers() == [c, d])
+check("位置合わせ: level link → mm from the chosen point, bar refreshed",
+      link.mm_ref == "apex" and not link.level_fraction and _Shell.synced)
+link.teardown()
 
 # ------------------------------------------------------------ start dialog
 from multi_dicomviewer.ui.main_window import MainWindow  # noqa: E402

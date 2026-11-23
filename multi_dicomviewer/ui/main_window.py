@@ -2115,6 +2115,19 @@ class MainWindow(QMainWindow):
         f = lbl.font(); f.setBold(True); lbl.setFont(f)
         r2.addWidget(lbl)
         r2.addSpacing(10)
+        # Redo the start-up choices without leaving SyncCT (user 2026-11-23):
+        # 位置合わせ = the 「画像位置合わせ」 dialog, 縮尺合わせ = same zoom.
+        self._sv_align_btn = QPushButton(t("位置合わせ"))
+        self._sv_align_btn.setToolTip(t(
+            "画像位置合わせをやり直す（今のまま / MV-AoV点 / Apex点 / 再設定）"))
+        self._sv_align_btn.clicked.connect(self._sv_realign)
+        r2.addWidget(self._sv_align_btn)
+        self._sv_scale_btn = QPushButton(t("縮尺合わせ"))
+        self._sv_scale_btn.setToolTip(t(
+            "両ペインを同じズームに合わせ直す（各自でズームした後に）"))
+        self._sv_scale_btn.clicked.connect(self._sv_match_scale)
+        r2.addWidget(self._sv_scale_btn)
+        r2.addSpacing(10)
         self._sv_level_cap = QLabel(t("レベル同期:"))
         r2.addWidget(self._sv_level_cap)
         self._sv_frac_btn = QPushButton(t("按分")); self._sv_frac_btn.setCheckable(True)
@@ -2133,11 +2146,6 @@ class MainWindow(QMainWindow):
         self._sv_level_na.setStyleSheet("color:black;")
         r2.addWidget(self._sv_level_na)
         r2.addSpacing(16)
-        self._sv_scale_btn = QPushButton(t("縮尺を合わせる"))
-        self._sv_scale_btn.setToolTip(t(
-            "両ペインを同じズームに合わせ直す（各自でズームした後に）"))
-        self._sv_scale_btn.clicked.connect(self._sv_match_scale)
-        r2.addWidget(self._sv_scale_btn)
         self._sv_exit_btn = QPushButton(t("SyncCT終了"))
         self._sv_exit_btn.clicked.connect(self._stop_syncview)
         r2.addWidget(self._sv_exit_btn)
@@ -2251,6 +2259,33 @@ class MainWindow(QMainWindow):
             self._syncview_link.match_scale()
             self._sv_set_scale_matched(True)
 
+    def _sv_realign(self) -> None:
+        """位置合わせ (SyncCT bar): the start-up 「画像位置合わせ」 again — move
+        both CTs onto the MV-AoV / Apex point (the mm level link then counts
+        from it), or leave them (今のまま / 再設定). SyncCT stays on."""
+        link = getattr(self, "_syncview_link", None)
+        if link is None:
+            return
+        from multi_dicomviewer.ui import sync_view as _sv
+        viewers = link.viewers()
+        how = self._sv_ask_start_mode(
+            {w: _sv.point_available(viewers, w) for w in _sv.LANDMARKS})
+        if how not in _sv.LANDMARKS:
+            return
+        try:
+            ok = _sv.center_on_point(viewers, how)
+        except Exception:                                # noqa: BLE001
+            ok = False
+        if not ok:
+            QMessageBox.warning(self, t("SyncCT"),
+                                t("Could not move the images to the chosen point."))
+            return
+        if link.level_link_active():
+            link.set_mm_ref(how)
+            link.set_level_fraction(False)
+        link.note_view_change()
+        self._sv_sync_bar_state()
+
     def _sv_set_scale_matched(self, matched: bool) -> None:
         """Tint the '縮尺を合わせる' button green while both panes share one scale
         (a synced zoom keeps them matched), so 'already same scale' is visible."""
@@ -2262,7 +2297,7 @@ class MainWindow(QMainWindow):
             b.setText(t("縮尺一致中"))
         else:
             b.setStyleSheet("")
-            b.setText(t("縮尺を合わせる"))
+            b.setText(t("縮尺合わせ"))
 
     def _toggle_syncview(self) -> None:
         """Tools ▸ SyncCT (checkable): link / unlink the two shown CTs so mouse

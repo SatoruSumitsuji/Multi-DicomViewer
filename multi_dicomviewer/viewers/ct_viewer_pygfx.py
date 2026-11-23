@@ -7598,6 +7598,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # replay a peer's operation with the SAME tool regardless of what this
         # viewer's tool happens to be set to.
         t = tool if tool is not None else self._tool
+        _pg_c0 = np.asarray(self._center, float).copy()   # SyncCT paging
         # MV+Apex Auto between its two clicks: keep the same image.
         if self._lv_pick_blocks_tool(t):
             return
@@ -7784,20 +7785,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # position about each pane's own centre — not a portable delta). PAGING
         # is excluded while the LV-level link is on (_lv_cosync_on): the level is
         # mirrored as mm / apex→base fraction instead, not as a raw slice delta.
-        # The level route is taken under the SAME condition as the wheel's
-        # (LV-volume analysis open, not tracing); otherwise a Paging drag is
-        # mirrored as the raw delta, like the wheel.
-        _level = (getattr(self, "_lv_cosync_on", False)
-                  and self._lvv is not None and self._lv is None)
-        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK") if _level \
-            else ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")
-        if (_level and t == "PAGING" and self._sync_view_on
-                and not self._sync_view_applying):
-            # Paging drag under the LV-level link: send the LEVEL (mm along
-            # apex→MV; the link converts to 按分 when set), as the wheel does.
-            _lvl = self.lv_cosync_level_mm()
-            if _lvl is not None:
-                self.lv_cosync_level_changed.emit(float(_lvl))
+        # Paging is NOT replayed as pixels (each CT would page by its own
+        # voxel size and the pair drifted apart): _sync_emit_paging sends the
+        # level (short-axis-like pane) or the real mm instead.
+        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK")
+        if t == "PAGING":
+            self._sync_emit_paging(which, _pg_c0)
         if (self._sync_view_on and not self._sync_view_applying and t in _ops):
             self.sync_view_op.emit("drag", {
                 "which": which, "dx": dx, "dy": dy, "shift": shift,
@@ -7808,13 +7801,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         if self._lv_pick_locked():          # MV+Apex Auto: keep the same image
             return
-        # SyncCT (LV-volume level link): paging steps ALONG the LV long axis and
-        # broadcasts the level so the paired CT mirrors it (mm / apex→base
-        # fraction). Takes priority so both views page together.
-        if (getattr(self, "_lv_cosync_on", False)
-                and self._lvv is not None and self._lv is None):
-            self.lv_cosync_step(1 if delta > 0 else -1)
-            return
         # SAX: the wheel scrolls the cross-section LEVEL (up = toward the apex),
         # so you can page through the short-axis stack without grabbing the line.
         if self._lv_sax_active():
@@ -7824,6 +7810,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._page2d(1 if delta > 0 else -1)   # mirrored inside (page2d)
             return
         before = self._view_snapshot()
+        _pg_c0 = np.asarray(self._center, float).copy()   # SyncCT
         _, _, n = self._axes_for(which)
         # Wheel up = toward the ▲ apex (same convention as drag-paging).
         d = 1.0 if delta > 0 else -1.0
@@ -7834,7 +7821,110 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._view_initial = False
         self._refresh(lod=True)            # smooth wheel-paging (slab MIP defers)
         self._undo_view(before, self._view_snapshot())
-        self._sync_emit_wheel(which, delta)
+        self._sync_emit_paging(which, _pg_c0)
+
+    # ------------------------------------------------ SyncCT paging mirror
+    def _sync_page_up(self, which):
+        """Unit 3-D vector of "page UP" for pane *which* (toward the other
+        pane's green ▲ apex) — the same sign rule the Paging drag uses."""
+        _, _, n = self._axes_for(which)
+        return np.asarray(n, float) * self._paging_sign(which)
+
+    def _sync_level_route(self, which) -> bool:
+        """True when a paging of pane *which* should be mirrored as the LV
+        LEVEL (按分 / mm): the level link is on, not tracing, and the pane is a
+        short-axis-like plane (its normal within ~45° of the apex→MV axis)."""
+        if not getattr(self, "_lv_cosync_on", False) or self._lv is not None:
+            return False
+        info = self._lv_cosync_axis()
+        if info is None:
+            return False
+        n = np.asarray(self._frame[which][2], float)
+        return abs(float(n @ np.asarray(info[1], float))) >= 0.7
+
+    def _sync_emit_paging(self, which, c_before) -> None:
+        """SyncCT: mirror a 3-D paging of pane *which* (centre was *c_before*).
+        Short-axis-like pane under the level link → the absolute LEVEL (so the
+        pair can never drift apart); otherwise the real distance moved in mm
+        (the old pixel / notch replay moved each CT by ITS OWN voxel size, so
+        two CTs with different voxels drifted apart)."""
+        if (not getattr(self, "_sync_view_on", False)
+                or getattr(self, "_sync_view_applying", False)):
+            return
+        d = np.asarray(self._center, float) - np.asarray(c_before, float)
+        if float(np.linalg.norm(d)) < 1e-9:
+            return
+        if self._sync_level_route(which):
+            lvl = self.lv_cosync_level_mm()
+            if lvl is not None:
+                self.lv_cosync_level_changed.emit(float(lvl))
+            return
+        self.sync_view_op.emit("page_mm", {
+            "which": which, "mm": float(d @ self._sync_page_up(which))})
+
+    def _sync_apply_page_mm(self, which, mm) -> None:
+        """Peer side of "page_mm": page pane *which* by *mm* (page-UP +).
+
+        When THIS CT's volume edge stops the move short (the source CT still
+        moved), the shortfall is kept as a debt and paid back first on the
+        following pages — so once the source comes back, the pair is aligned
+        again instead of keeping the offset for good (user 2026-11-23)."""
+        if self._mode == "2D":
+            return
+        up = self._sync_page_up(which)
+        dbt = getattr(self, "_sync_pg_debt", None) or {}
+        old = dbt.get(which)
+        debt = 0.0
+        if old is not None and float(np.asarray(old[0]) @ up) > 0.999:
+            debt = float(old[1])
+        want = float(mm) + debt
+        c0 = np.asarray(self._center, float).copy()
+        t = self._sync_line_fraction(c0, up * want)
+        got = up * (want * t)
+        self._center = c0 + got
+        self._clamp_center()
+        self._pc[which] = np.asarray(self._pc[which], float) + got
+        rest = want * (1.0 - t)
+        if abs(rest) > 1e-6:
+            dbt[which] = (up.copy(), rest)
+        else:
+            dbt.pop(which, None)
+        self._sync_pg_debt = dbt
+        self._view_initial = False
+        self._refresh()
+
+    def _sync_line_fraction(self, c0, vec) -> float:
+        """Largest t in [0, 1] with c0 + t*vec inside the volume bounds (stop
+        ON the paging line at the edge, not slide along the box face)."""
+        b = self._bounds
+        t = 1.0
+        for i in range(3):
+            lo, hi = float(b[2 * i]), float(b[2 * i + 1])
+            d = float(vec[i])
+            c = float(c0[i])
+            if d > 1e-12:
+                t = min(t, max(0.0, (hi - c) / d))
+            elif d < -1e-12:
+                t = min(t, max(0.0, (lo - c) / d))
+        return max(0.0, min(1.0, t))
+
+    def _sync_pg_debt_reset(self) -> None:
+        """Forget paging debts (after an alignment / SyncCT on-off)."""
+        self._sync_pg_debt = {}
+        self._sync_pg_debt2d = 0
+
+    def _sync_emit_recenter(self, which, c_before, frame_before) -> None:
+        """SyncCT: mirror a recentre (double-click, or the crosshair-centre drag
+        release) as the centre's move in that pane's own (u, v, n) axes; the
+        peer moves its centre the same way and recentres its image on it."""
+        if (not getattr(self, "_sync_view_on", False)
+                or getattr(self, "_sync_view_applying", False)):
+            return
+        d = np.asarray(self._center, float) - np.asarray(c_before, float)
+        u, v, n = (np.asarray(a, float) for a in frame_before)
+        self.sync_view_op.emit("recenter", {
+            "which": which, "du": float(d @ u), "dv": float(d @ v),
+            "dn": float(d @ n)})
 
     def _sync_emit_wheel(self, which, delta):
         """SyncCT: mirror a paging wheel step to the paired CT (same slice
@@ -7981,11 +8071,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._mode == "2D":
             self._sync_seek()
         self._undo_view(before, self._view_snapshot())
+        self._sync_pg_debt_reset()     # a fresh alignment
 
     def set_sync_view_on(self, on: bool) -> None:
         """Enter/leave SyncCT. While ON, view gestures are broadcast
         (sync_view_op) so the paired CT mirrors them."""
         self._sync_view_on = bool(on)
+        self._sync_pg_debt_reset()
 
     def apply_sync_op(self, kind: str, params: dict) -> None:
         """Replay a peer CT's mirrored operation here. Guarded so the replay
@@ -8004,7 +8096,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._wheel(params["which"], params["delta"])
             elif kind == "page2d":                   # 2-D native-slice step
                 if self._mode == "2D":
-                    self._page2d(int(params.get("step", 0)))
+                    # Same edge debt as page_mm, in native slices.
+                    want = (int(params.get("step", 0))
+                            + int(getattr(self, "_sync_pg_debt2d", 0)))
+                    s0 = int(self._slice2d)
+                    self._page2d(want)
+                    self._sync_pg_debt2d = want - (int(self._slice2d) - s0)
+            elif kind == "page_mm":                  # 3-D paging, real mm
+                self._sync_apply_page_mm(params["which"], params["mm"])
+            elif kind == "recenter":                 # double-click recentre
+                w = params["which"]
+                u, v, n = (np.asarray(a, float) for a in self._frame[w])
+                self.sync_center_on(np.asarray(self._center, float)
+                                    + params["du"] * u + params["dv"] * v
+                                    + params["dn"] * n)
             elif kind == "spin":                     # roll-angle delta (SyncCT)
                 w = params["which"]
                 self._roll[w] += _SPIN_SIGN * float(params["dphi"])
@@ -8583,6 +8688,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # so skip self-recording then to keep it one Ctrl+Z step.
         before = (None if getattr(self, "_gesture_moved", False)
                   else self._view_snapshot())
+        _rc_c0 = np.asarray(self._center, float).copy()   # SyncCT
+        _rc_fr = tuple(np.asarray(a, float).copy()
+                       for a in self._frame[which])
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, _n = self._frame[which]
         self._center = self._pc[which] + wx * u + wy * v
@@ -8606,6 +8714,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._vr_schedule_dvr("A")               # refresh the DVR frame
         if before is not None:
             self._undo_view(before, self._view_snapshot())
+        self._sync_emit_recenter(which, _rc_c0, _rc_fr)
 
     def _cpr_vr_view_world(self):
         """CPR VR (pane A) view in world mm: (centre incl. pan, screen-right,
