@@ -156,6 +156,7 @@ class _RangeMarks(QWidget):
     range_changed = pyqtSignal(int, int)   # (start, end), 0-based frame idx
     angle_mark_clicked = pyqtSignal(int)   # click a ▽/▲ → jump to that frame
     angle_mark_delete = pyqtSignal(int)    # right-click ▸ Delete that keyframe
+    range_reset = pyqtSignal()             # right-click a range ▽ → full range
 
     _TRI_HW = 6        # triangle half-width, px
     _TRI_H = 11        # triangle height, px (drawn bottom-anchored on the strip)
@@ -315,10 +316,16 @@ class _RangeMarks(QWidget):
             else:
                 self.angle_mark_clicked.emit(int(f))
             return
-        if e.button() != Qt.MouseButton.LeftButton:
-            return
         ds = abs(x - self._value_x(self._start))
         de = abs(x - self._value_x(self._end))
+        if e.button() == Qt.MouseButton.RightButton:
+            # Right-click on either range ▽ (user 2026-11-23): both ends jump
+            # back to the very first / last frame.
+            if min(ds, de) <= self._GRAB_HX:
+                self.range_reset.emit()
+            return
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
         # Only grab when the press is within a triangle's horizontal reach
         # (_GRAB_HX). A click elsewhere on the strip does nothing, so it can no
         # longer drag a far triangle or fight the seek handle below.
@@ -1276,6 +1283,7 @@ class XAViewer(AbstractViewer):
         # up with the slider positions.
         self._range_marks = _RangeMarks(self.frame_slider)
         self._range_marks.range_changed.connect(self._on_range_marks_changed)
+        self._range_marks.range_reset.connect(self._reset_play_range)
         self._range_marks.setVisible(False)   # shown once a cine loads
         seek_col = QVBoxLayout()
         seek_col.setContentsMargins(0, 0, 0, 0)
