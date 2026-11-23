@@ -2241,6 +2241,10 @@ class MainWindow(QMainWindow):
         self._sv_level_na.setVisible(not lvl)
         if lvl:
             self._sv_update_level_buttons(link.level_fraction)
+            self._sv_mm_btn.setToolTip(
+                t("MV-AoV点からの絶対 mm で対応（左室長の差が見える）")
+                if getattr(link, "mm_ref", "apex") == "mv"
+                else t("apex からの絶対 mm で対応（左室長の差が見える）"))
 
     def _sv_match_scale(self) -> None:
         if getattr(self, "_syncview_link", None) is not None:
@@ -2276,22 +2280,36 @@ class MainWindow(QMainWindow):
             )
             return
         viewers = viewers[:2]
-        # 1) Confirm starting from the CURRENT views as the initial position.
-        if QMessageBox.question(
-                self, t("SyncCT"),
-                t("Start SyncCT with the two panes' CURRENT views as the "
-                  "initial position?"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-        ) != QMessageBox.StandardButton.Yes:
+        from multi_dicomviewer.ui import sync_view as _sv
+        # 1) Image alignment (user 2026-11-23): keep the current views, or move
+        #    each CT so its MV-AoV point / Apex point is the image centre, or
+        #    back out to re-adjust by hand (再設定).
+        how = self._sv_ask_start_mode(
+            {w: _sv.point_available(viewers, w) for w in _sv.LANDMARKS})
+        if how not in ("current",) + _sv.LANDMARKS:
             self._syncview_act.setChecked(False)
             return
-        from multi_dicomviewer.ui.sync_view import SyncViewLink
-        self._syncview_link = SyncViewLink(viewers[0], viewers[1], self)
+        if how in _sv.LANDMARKS:
+            try:
+                ok = _sv.center_on_point(viewers, how)
+            except Exception:                            # noqa: BLE001
+                ok = False
+            if not ok:
+                self._syncview_act.setChecked(False)
+                QMessageBox.warning(
+                    self, t("SyncCT"),
+                    t("Could not move the images to the chosen point."))
+                return
+        self._syncview_link = _sv.SyncViewLink(viewers[0], viewers[1], self)
         self._syncview_link.set_undo_callback(self._sv_update_undo_buttons)
-        # Default the level-sync to 按分 (fraction) — the phase-comparison case.
         if self._syncview_link.level_link_active():
-            self._syncview_link.set_level_fraction(True)
+            if how in _sv.LANDMARKS:
+                # Aligned on a point → the level link counts mm FROM that point.
+                self._syncview_link.set_mm_ref(how)
+                self._syncview_link.set_level_fraction(False)
+            else:
+                # Default 按分 (fraction) — the phase-comparison case.
+                self._syncview_link.set_level_fraction(True)
         # 2) Offer the same-scale lock.
         if QMessageBox.question(
                 self, t("SyncCT"),
@@ -2319,6 +2337,43 @@ class MainWindow(QMainWindow):
         self._sv_sync_bar_state()
         self._sv_update_undo_buttons()
         self._refresh_active_pane_border()
+
+    def _sv_ask_start_mode(self, points_ok: dict):
+        """SyncCT start: 「画像位置合わせ」. Returns "current" (keep the two
+        panes' views), "mv" / "apex" (move each CT so that LV point is the image
+        centre — offered only when BOTH CTs have it; *points_ok* = {"mv": bool,
+        "apex": bool}) or None (再設定: back out, adjust by hand, start again)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(t("SyncCT"))
+        txt = t("Image alignment: how should the two CTs be lined up?")
+        if not all(points_ok.get(w) for w in ("mv", "apex")):
+            txt += "\n\n" + t("(A point that is not set on both CTs cannot "
+                              "be chosen.)")
+        box.setText(txt)
+        b_cur = box.addButton(t("As it is"), QMessageBox.ButtonRole.AcceptRole)
+        b_cur.setToolTip(t("Start from the two panes' current views."))
+        btn = {}
+        for w, lab in (("mv", "MV-AoV point"), ("apex", "Apex point")):
+            b = box.addButton(t(lab), QMessageBox.ButtonRole.AcceptRole)
+            b.setEnabled(bool(points_ok.get(w)))
+            b.setToolTip(t(
+                "Move each CT so this point is at the image centre (orientation "
+                "and zoom unchanged); the mm level link counts from this point."))
+            btn[w] = b
+        b_redo = box.addButton(t("Re-adjust"), QMessageBox.ButtonRole.RejectRole)
+        b_redo.setToolTip(t("Don't start yet — adjust the views by hand, then "
+                            "turn SyncCT on again."))
+        box.setDefaultButton(b_cur)
+        box.setEscapeButton(b_redo)
+        box.exec()
+        c = box.clickedButton()
+        if c is b_cur:
+            return "current"
+        for w, b in btn.items():
+            if c is b and points_ok.get(w):
+                return w
+        return None
 
     def _sv_init_bar_state(self, v) -> None:
         """Reflect viewer *v*'s current side / CenterLine / tool on the shared

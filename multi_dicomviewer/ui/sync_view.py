@@ -23,7 +23,45 @@ Both layers are re-entrancy guarded so a mirrored change never echoes back.
 """
 from __future__ import annotations
 
+import numpy as np
 from PyQt6.QtCore import QObject, QTimer
+
+
+# ---------------------------------------------------------------- landmarks
+#: The two LV points the MV-AoV+Apex step sets on a CT.
+LANDMARKS = ("mv", "apex")
+
+
+def lv_point(viewer, which: str):
+    """The MV-AoV point (*which* = "mv") or the Apex point ("apex") of a CT
+    viewer as a 3-D array (volume mm), or None when it is not set."""
+    try:
+        if which == "apex":
+            p = getattr(viewer, "_lv_apex", None)
+        else:
+            mv = (getattr(viewer, "_lv_valves", None) or {}).get("mitral")
+            p = None if mv is None else mv[0]
+        return None if p is None else np.asarray(p, float).reshape(3)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def point_available(viewers, which: str) -> bool:
+    """True when every viewer has that LV point."""
+    return bool(viewers) and all(lv_point(v, which) is not None
+                                 for v in viewers)
+
+
+def center_on_point(viewers, which: str) -> bool:
+    """Image alignment by an LV point: move each CT so its MV-AoV point / Apex
+    point sits at the image centre (and the crosshair centre). Orientation and
+    zoom are left as they are. Returns True when every viewer was moved."""
+    pts = [lv_point(v, which) for v in viewers]
+    if not viewers or any(p is None for p in pts):
+        return False
+    for v, p in zip(viewers, pts):
+        v.sync_center_on(p)
+    return True
 
 
 class SyncViewLink(QObject):
@@ -32,6 +70,9 @@ class SyncViewLink(QObject):
         self._v = [viewer_a, viewer_b]
         self._syncing = False
         self._level_fraction = False            # False = mm, True = 按分 (fraction)
+        #: Reference point of the "mm" level link: "apex" (default) or "mv"
+        #: (the point chosen for the image alignment) — mm are counted from it.
+        self._mm_ref = "apex"
         # Paired-snapshot undo/redo (method A): the shell's Undo/Redo revert the
         # last SYNCED gesture on BOTH panes together. A short debounce coalesces
         # the many per-increment sync_view_op emits of one drag into ONE entry.
@@ -157,6 +198,30 @@ class SyncViewLink(QObject):
         if mm is not None:
             self._on_level(0, float(mm))
 
+    @property
+    def mm_ref(self) -> str:
+        return self._mm_ref
+
+    def set_mm_ref(self, which: str) -> None:
+        """Count the "mm" level link from the Apex ("apex") or the MV-AoV
+        point ("mv"), and re-apply when mm mode is on."""
+        self._mm_ref = "mv" if which == "mv" else "apex"
+        if self._level_on and not self._level_fraction:
+            self.set_level_fraction(False)
+
+    def _ref_level(self, v) -> float:
+        """The reference point's position on *v*'s long axis, in the viewer's
+        level mm (0 for the Apex on the plain apex→MV axis)."""
+        try:
+            info = v._lv_cosync_axis()
+            p = lv_point(v, self._mm_ref)
+            if info is None or p is None:
+                return 0.0
+            apex, axis = np.asarray(info[0], float), np.asarray(info[1], float)
+            return float((p - apex) @ axis)
+        except Exception:                                # noqa: BLE001
+            return 0.0
+
     def _on_level(self, src: int, mm: float) -> None:
         if self._syncing or not self._level_on:
             return
@@ -168,7 +233,9 @@ class SyncViewLink(QObject):
                 if frac is not None:
                     vd.lv_cosync_set_level_fraction(float(frac), silent=True)
             else:
-                vd.lv_cosync_set_level_mm(float(mm), silent=True)
+                # same mm from the reference point (Apex or MV-AoV) of each CT
+                d = float(mm) - self._ref_level(vs)
+                vd.lv_cosync_set_level_mm(self._ref_level(vd) + d, silent=True)
         except Exception:                                # noqa: BLE001
             pass
         finally:

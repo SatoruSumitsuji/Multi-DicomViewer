@@ -7256,6 +7256,32 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         SAX levels (those aren't view-tool ops)."""
         return self._image is not None
 
+    def sync_center_on(self, point) -> None:
+        """SyncCT image alignment: make the 3-D *point* (an LV landmark) the
+        image centre AND the crosshair centre in both panes — like a double-
+        click recentre on it. Orientation and zoom stay; one undo step."""
+        if self._image is None:
+            return
+        before = self._view_snapshot()
+        self._center = np.asarray(point, float).reshape(3).copy()
+        if self._mode == "2D":                   # 2-D: go to that native slice
+            sz = self._dims[2]
+            nz = self._image.GetDimensions()[2]
+            self._slice2d = int(min(max(int(round(self._center[2] / sz))
+                                        if sz > 1e-6 else 0, 0), max(0, nz - 1)))
+            self._center[2] = self._slice2d * sz if sz > 1e-6 else 0.0
+        self._clamp_center()
+        self._pc = {"A": self._center.copy(), "B": self._center.copy()}
+        self._view_initial = False
+        for k in ("A", "B"):
+            self._center_camera(k)
+        self._refresh()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if self._mode == "2D":
+            self._sync_seek()
+        self._undo_view(before, self._view_snapshot())
+
     def set_sync_view_on(self, on: bool) -> None:
         """Enter/leave SyncCT. While ON, view gestures are broadcast
         (sync_view_op) so the paired CT mirrors them."""
@@ -7276,6 +7302,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                            tool=params.get("tool"))
             elif kind == "wheel":
                 self._wheel(params["which"], params["delta"])
+            elif kind == "page2d":                   # 2-D native-slice step
+                if self._mode == "2D":
+                    self._page2d(int(params.get("step", 0)))
             elif kind == "spin":                     # roll-angle delta (SyncCT)
                 w = params["which"]
                 self.pane[w].ren.GetActiveCamera().Roll(
@@ -22173,6 +22202,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if new_slice == self._slice2d:
             return                      # already at the end — nothing to undo
         before = self._view_snapshot()
+        moved = new_slice - self._slice2d
         self._slice2d = new_slice
         z = self._slice2d * sz if sz > 1e-6 else 0.0
         self._center[2] = z
@@ -22182,6 +22212,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._refresh()
         self._sync_seek()
         self._undo_view(before, self._view_snapshot())
+        # SyncCT: every 2-D slice step (wheel, Paging drag, arrow keys) is
+        # mirrored to the paired CT as the same number of native slices.
+        if (getattr(self, "_sync_view_on", False)
+                and not getattr(self, "_sync_view_applying", False)):
+            self.sync_view_op.emit("page2d", {"step": int(moved)})
 
     # ------------------------------------------------------ 2-D frame seek bar
     def _build_seek_bar(self) -> QWidget:
@@ -22947,9 +22982,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # position about each pane's own centre — not a portable delta). PAGING
         # is excluded while the LV-level link is on (_lv_cosync_on): the level is
         # mirrored as mm / apex→base fraction instead, not as a raw slice delta.
-        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK") \
-            if getattr(self, "_lv_cosync_on", False) \
+        # The level route is taken under the SAME condition as the wheel's
+        # (LV-volume analysis open, not tracing); otherwise a Paging drag is
+        # mirrored as the raw delta, like the wheel.
+        _level = (getattr(self, "_lv_cosync_on", False)
+                  and self._lvv is not None and self._lv is None)
+        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK") if _level \
             else ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")
+        if (_level and t == "PAGING" and self._sync_view_on
+                and not self._sync_view_applying):
+            # Paging drag under the LV-level link: send the LEVEL (mm along
+            # apex→MV; the link converts to 按分 when set), as the wheel does.
+            _lvl = self.lv_cosync_level_mm()
+            if _lvl is not None:
+                self.lv_cosync_level_changed.emit(float(_lvl))
         if (self._sync_view_on and not self._sync_view_applying and t in _ops):
             self.sync_view_op.emit("drag", {
                 "which": which, "dx": dx, "dy": dy, "shift": shift,
@@ -22971,8 +23017,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._lv_step_level(1 if delta > 0 else -1)
             return
         if self._mode == "2D":
-            self._page2d(1 if delta > 0 else -1)
-            self._sync_emit_wheel(which, delta)
+            self._page2d(1 if delta > 0 else -1)   # mirrored inside (page2d)
             return
         # Same contract as the PAGING tool: page the wheeled pane itself —
         # the visible image scrolls through slices. Step C and THIS pane's

@@ -194,6 +194,7 @@
   "MV-AoV+Apex の Auto を始めます。\n\n画像設定：先に大動脈基部が見える画像を調整します（Rotate / Paging などが普段どおり使えます）。調整後にもう一度 Auto を押すと、この選択画面に戻ります。\n\nMV-AoV点設定：すぐに大動脈弁のすぐ上、大動脈基部の中を 1 回クリックします。": "Starting MV-AoV+Apex Auto.\n\nImage setup: first adjust the image so the aortic root is visible (Rotate / Paging etc. work as usual). Press Auto again after adjusting to come back to this choice.\n\nSet MV-AoV point: click once right away inside the aortic root, just above the aortic valve.",
   "MV-AoV・Apex が揃っていません。先に「元CTで編集」で LV データを 読み込んでから保存してください。": "MV-AoV and Apex are not both set. Load the LV data with \"Edit on source CT\" first, then save.",
   "MV-AoV・Apex の両方が開いていないと Epi / Blood は開けません（不足: {m}）。先にMV-AoV・Apexを一緒にドロップしてください。": "Epi / Blood can't be opened unless both MV-AoV and Apex are open (missing: {m}). Drop the MV-AoV and Apex files together first.",
+  "MV-AoV点からの絶対 mm で対応（左室長の差が見える）": "Match by absolute mm from the MV-AoV point (LV length differences are visible)",
   "MV-AoV点と心尖部を検出中…": "Detecting the MV-AoV point and the apex…",
   "MV-AoV点と心尖部（MV-AoV点から {d:.0f} mm）を自動設定しました。確認して、ずれていれば交点を合わせて Set（MV-AoV点）/ Apex Set （心尖部）で修正してください。": "MV-AoV point and apex ({d:.0f} mm from the MV-AoV point) set automatically. Check them; if off, move the crossing and correct with Set (MV-AoV point) / Apex Set (apex).",
   "MV-AoV点は Auto（大動脈基部の中を 1 回クリック）で設定するか、センターラインの交点を MV-AoV 移行点に合わせて Set を押します。": "Set the MV-AoV point with Auto (one click inside the aortic root), or put the centreline crossing on the MV-AoV transition point and press Set.",
