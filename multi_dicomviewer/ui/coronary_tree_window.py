@@ -1805,7 +1805,13 @@ class CoronaryTreeWindow(SnapDock):
                 on = item.checkState(_C_EXCL) == Qt.CheckState.Checked
                 if bool(v.excluded) != on:
                     self._activate_item_ct(item)
-                    self._set_excluded([vid], on)
+                    # Deferred: _set_excluded rebuilds the list (_populate),
+                    # which deletes *item* — doing that inside its own
+                    # itemChanged made Qt touch freed memory afterwards (a
+                    # random access-violation crash on ticking 除外).
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(
+                        0, lambda _v=vid, _on=on: self._set_excluded([_v], _on))
             return
         if _col not in (0, -1):
             return
@@ -2487,7 +2493,10 @@ class CoronaryTreeWindow(SnapDock):
         if self._targets[ti].get("hidden", False) == hidden:
             return                               # no real change (avoid churn)
         self._targets[ti]["hidden"] = hidden
-        self._refresh_targets_table()
+        # Deferred: the refresh clear()s the table, deleting *it* inside its
+        # own itemChanged (use-after-free crash risk, as with 除外).
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._refresh_targets_table)
         self._push_overlay()
         self._push_territory()
 
