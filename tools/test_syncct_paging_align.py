@@ -193,6 +193,59 @@ for ref in ("apex", "mv"):
         v._lvv = None
 link.teardown()
 
+# User report 2026-11-23: both CTs on Rt (pane B = the short axis), aligned on
+# the MV-AoV point, mm level link → Paging moved only the crossline of the
+# peer, not its image. Pane B must page on BOTH CTs (drag and wheel).
+for v in (a, b):
+    v.set_side("Rt")
+    ex, ey, ez = np.eye(3)
+    v._frame["B"] = (ex, ey, ez)            # B = short axis (⟂ apex→MV, z)
+    v._frame["A"] = (ex, ez, -ey)           # A = its orthogonal companion
+app.processEvents()
+sv.center_on_point([a, b], "mv")
+link = sv.SyncViewLink(a, b)
+link.set_mm_ref("mv")
+link.set_level_fraction(False)
+
+
+def depth(v, k="B"):
+    n = np.asarray(v._frame[k][2], float)
+    return float(np.asarray(v._pc[k], float) @ n)
+
+
+for lvv in (None, {}):
+    for v in (a, b):
+        v._lvv = lvv
+    for name, fn in (("Paging drag", lambda: a._drag("B", 0, -15,
+                                                     tool="PAGING")),
+                     ("wheel", lambda: a._wheel("B", -1))):
+        sv.center_on_point([a, b], "mv")    # start on the MV-AoV point
+        da0, db0 = depth(a), depth(b)
+        fn()
+        app.processEvents()
+        da, db = depth(a) - da0, depth(b) - db0
+        tag = "LV analysis open" if lvv is not None else "no LV analysis"
+        check(f"Rt / MV-AoV / mm, {tag}: {name} pages the shown pane on both",
+              abs(da) > 0.3 and abs(db) > 0.3 and abs(da - db) < 0.05
+              if lvv is None else abs(da) > 0.3 and abs(db) > 0.3,
+              (round(da, 2), round(db, 2)))
+        if lvv is not None:
+            # LV analysis: matched by mm along each long axis, from MV-AoV
+            ra = a.lv_cosync_level_mm() - float(
+                (mv_a - a._lv_cosync_axis()[0]) @ a._lv_cosync_axis()[1])
+            rb = b.lv_cosync_level_mm() - float(
+                (mv_b - b._lv_cosync_axis()[0]) @ b._lv_cosync_axis()[1])
+            check(f"…{tag}: {name}: same mm from each MV-AoV point",
+                  abs(ra - rb) < 1e-6, (ra, rb))
+        check(f"…{tag}: {name}: both planes still pass through the centre",
+              all(abs(float((np.asarray(v._pc[k], float) - v._center)
+                            @ np.asarray(v._frame[k][2], float))) < 1e-6
+                  for v in (a, b) for k in ("A", "B")))
+for v in (a, b):
+    v._lvv = None
+    v.set_side("Bi")
+link.teardown()
+
 # 2-D: centring on a point also pages to that native slice
 for v in (a, b):
     v._set_mode("2D")

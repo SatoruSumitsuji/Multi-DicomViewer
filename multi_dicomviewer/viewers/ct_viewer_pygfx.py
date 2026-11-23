@@ -7904,15 +7904,26 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         info = self._lv_cosync_axis()
         if info is None or self._vol is None:
             return
-        apex, axis, amin, amax = info
-        mm = float(np.clip(float(mm), amin, amax))
+        apex, axis, _amin, _amax = info
+        # Not clipped to the apex..base range any more: aligned on the MV-AoV
+        # point the start sits AT the base end, so a clip froze the peer there
+        # (paging toward the base never synced). _clamp_center keeps the centre
+        # inside the volume.
+        mm = float(mm)
         cur = float((np.asarray(self._center, float) - apex) @ axis)
         mv = (mm - cur) * axis
         self._center = np.asarray(self._center, float) + mv
-        try:
-            self._pc["A"] = np.asarray(self._pc["A"], float) + mv
-        except Exception:                                # noqa: BLE001
-            pass
+        # BOTH panes follow the level (user 2026-11-23: with Rt shown, only
+        # pane A used to move, so the shown short axis stayed and just its
+        # crossline slid). Each pane's plane is slid along ITS OWN normal so it
+        # passes through the new centre — no in-plane drift / pan.
+        for _k in ("A", "B"):
+            try:
+                _n = np.asarray(self._frame[_k][2], float)
+                self._pc[_k] = (np.asarray(self._pc[_k], float)
+                                + float(_n @ mv) * _n)
+            except Exception:                            # noqa: BLE001
+                pass
         self._clamp_center()
         self._view_initial = False
         self._refresh(lod=True)
