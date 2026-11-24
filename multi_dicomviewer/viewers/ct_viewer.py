@@ -1161,7 +1161,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # to fine-tune the pseudo-centre in the cross-section (highest priority).
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._owner._cpr is not None and self._which == "A"
-                and not self._owner._cpr_tool_hold_on()
                 and self._owner._cpr_grab(e.position().x(), e.position().y())):
             # In EDIT mode (Measure on, no draw type / center-angle pick, no Alt)
             # ALSO jump the grabbed point to the click right now, so even a SINGLE
@@ -1192,7 +1191,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 and self._owner._meas_on
                 and not self._owner._meas_type
                 and self._owner._center_angle_target is None
-                and not self._owner._cpr_tool_hold_on()
                 and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)):
             k = self._owner._cpr_at_ctrl()
             if k is not None:
@@ -1249,9 +1247,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             if (self._which == "A" and self._owner._cpr is not None
                     and self._owner._cpr_context_menu(
                         e.position().x(), e.position().y())):
-                return
-            # Draw on hold (Rotate / Paging) → 「ReDraw」 resumes drawing.
-            if self._owner._cpr_redraw_menu():
                 return
             # The MV / AoV line (detected outline or ring) → 描き直す menu.
             _vh = self._owner._lv_valve_hit(
@@ -1353,10 +1348,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # the view mid-trace without leaving Measure. SHIFT is now the DRAW
         # CONSTRAINT (正円 / 縦横直線), matching PowerPoint. Falls through to the
         # same tool path idle-Measure uses.
-        # Draw on hold (Rotate / Paging picked while setting CPR lines) = Alt:
-        # the left-click runs the tool, never adds / grabs a point.
-        _alt = (bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
-                or self._owner._cpr_tool_hold_on())
+        _alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
         if self._owner._meas_on and not _alt:
             self._cross = False
             self._meas_drag = False
@@ -1675,8 +1667,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # be recentred without leaving Measure. A PLAIN double-click in Measure
         # still finishes the polyline draft. (_recenter → _redraw_meas keeps the
         # trace on the moved image.)
-        if (self._owner._meas_on and not (_shift or _alt)
-                and not self._owner._cpr_tool_hold_on()):
+        if self._owner._meas_on and not (_shift or _alt):
             # During a coronary CPR centreline trace, a PLAIN double-click must
             # NOT finish the polyline. Two deliberate point-clicks placed quickly
             # (click-release-click) can be read by the OS as a double-click, which
@@ -4066,11 +4057,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_draw_btn.setChecked(pend)
             # Red "armed" background while tracing (matches the LV trace buttons)
             # so it's obvious Draw is active / a CPR is being created.
-            # On hold (Rotate / Paging picked): pale dashed = paused, resume
-            # with right-click ▸ ReDraw (or this button).
             self._cpr_draw_btn.setStyleSheet(
-                ("background:#f6d5d0;color:#7a1f14;border:1px dashed #c0392b;" if self._cpr_tool_hold_on()
-                 else self._LV_STY["trace"]) if pend else self._LV_STY["off"])
+                self._LV_STY["trace"] if pend else self._LV_STY["off"])
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()
@@ -11177,7 +11165,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-        self._cpr_tool_hold_check(name)     # Rotate/Paging → Draw on hold
         self._refresh_tool_availability()
 
     def _refresh_tool_availability(self):
@@ -20728,15 +20715,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         auto-builds the short-axis."""
         if self._cpr_lasso_restore():
             return                                   # back from a Polygon lasso
-        if self._cpr_tool_hold_on() and getattr(
-                self, "_coronary_mpr_pending", False):
-            self._cpr_redraw()                       # on hold → resume, not disarm
-            return
         if self._image is None or self._mode != "3D":
             self._coronary_sync_ui()
             return
         self._coronary_mode = True
-        self._cpr_tool_hold = False
         if getattr(self, "_coronary_mpr_pending", False):   # armed → disarm
             self._coronary_mpr_pending = False
             self._cpr_vr_stop()                      # VR始点 only while tracing
@@ -20766,7 +20748,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
-        self._cpr_tool_hold = False                   # no Draw hold left
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
@@ -21517,6 +21498,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._lvv is not None and self._lv is None \
                 and getattr(self, "_lv_endo_mask_comp", None) is not None:
             self._lvv_show_diameter(render=False)
+        # Auto-Track at a fork: the candidate numbers on both panes
+        if getattr(self, "_cpr_fork_marks", None) or any(
+                getattr(self.pane[k], "fork_lbls", None) for k in ("A", "B")):
+            self._draw_cpr_fork_labels()
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
@@ -21553,6 +21538,37 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             ps = max(hv, hu * ph / pw)
             cam.SetParallelScale(max(1e-3, ps))
         p.render()
+
+    def _draw_cpr_fork_labels(self) -> None:
+        """Fork candidate numbers 1, 2, … (Auto-Track waiting at a fork) as
+        billboard texts beside each candidate lumen, on the short axis AND
+        the long-axis pane (re-placed from 3-D on every refresh)."""
+        r, g, b = (x / 255.0 for x in self._CPR_FORK_RGB)
+        for key in ("A", "B"):
+            p = self.pane[key]
+            had = bool(getattr(p, "fork_lbls", None))
+            for a in getattr(p, "fork_lbls", None) or []:
+                p.ren.RemoveActor(a)
+            p.fork_lbls = []
+            pts = self._cpr_fork_label_pts(key)
+            for text, (x, y) in pts:
+                ta = vtkBillboardTextActor3D()
+                ta.SetInput(text)
+                ta.SetPosition(float(x), float(y), 0.8)
+                ta.SetDisplayOffset(10, 8)       # beside the lumen, not on it
+                tp = ta.GetTextProperty()
+                tp.SetColor(r, g, b)
+                tp.SetFontSize(26)
+                tp.SetBold(True)
+                tp.SetShadow(True)
+                tp.SetFrame(True)
+                tp.SetFrameColor(r, g, b)
+                tp.SetBackgroundColor(0.0, 0.0, 0.0)
+                tp.SetBackgroundOpacity(0.65)
+                p.ren.AddActor(ta)
+                p.fork_lbls.append(ta)
+            if had or pts:
+                p.render()
 
     def _draw_cpr_overlay(self):
         """Short-axis (CPR) pane overlay: a CENTRED crosshair and a ▲ sized to
@@ -21610,7 +21626,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p.meas_pts_mapper.SetInputData(_points_pd(filled))
         gap = filled if (filled and self._cpr_at_gap()) else []
         epi = self._cpr_epi_section_2d()          # CPR row → Epi (short axis)
-        if hollow or gap or epi:
+        mapl = self._cpr_map_plane_section_2d()    # right-pane plane line
+        forks = self._cpr_fork_label_pts("A")      # fork candidates (rings)
+        if hollow or gap or epi or mapl or forks:
             dpr = max(1.0, p.canvas.devicePixelRatioF())
             ps = p.ren.GetActiveCamera().GetParallelScale()
             h_phys = max(1.0, p.canvas.height() * dpr)
@@ -21625,6 +21643,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if epi:                              # the Epi border on this section
                 rings = list(rings) + list(epi)
                 cols += [self._CPR_EPI_RGB + (255,)] * len(epi)
+            if mapl:                             # the right pane's plane
+                rings = list(rings) + list(mapl)
+                cols += [self._CPR_MAP_LINE_RGB + (255,)] * len(mapl)
+            if forks:                            # fork candidates: a ring
+                fr = _ring_polylines([q for _t, q in forks],
+                                     ring_r_world * 2.2)
+                rings = list(rings) + list(fr)
+                cols += [self._CPR_FORK_RGB + (255,)] * len(fr)
             p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())

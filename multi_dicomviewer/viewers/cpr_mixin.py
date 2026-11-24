@@ -1061,140 +1061,6 @@ class CPRMixin:
             b.setChecked(bool(on))
             b.blockSignals(False)
 
-    # ---- Rotate / Paging while setting CPR lines: Draw on hold → ReDraw ------
-    _CPR_HOLD_TOOLS = ("ROTATE", "PAGING")
-
-    def _cpr_tool_hold_on(self) -> bool:
-        """True while Draw / edit is on hold for a view tool: picking Rotate or
-        Paging while setting CPR lines puts the left-click back on the TOOL in
-        every pane (no trace point added, no edit point grabbed — before, the
-        right pane often kept measuring, so Rotate / Paging seemed dead there).
-        Right-click ▸ ReDraw (or the Draw button) resumes drawing; an
-        unfinished trace is kept and continues."""
-        return bool(getattr(self, "_cpr_tool_hold", False)
-                    and getattr(self, "_coronary_mode", False)
-                    and getattr(self, "_meas_on", False))
-
-    def _cpr_tool_hold_check(self, name) -> None:
-        """_set_tool hook: Rotate / Paging selected (key or button) while
-        setting CPR lines → hold Draw."""
-        if (name in self._CPR_HOLD_TOOLS
-                and getattr(self, "_coronary_mode", False)
-                and getattr(self, "_meas_on", False)
-                and getattr(self, "_mode", "3D") == "3D"):
-            was = bool(getattr(self, "_cpr_tool_hold", False))
-            self._cpr_tool_hold = True
-            self._coronary_sync_ui()
-            if not was:
-                self._cpr_hold_notice(False)
-
-    def _cpr_redraw(self) -> None:
-        """Right-click ▸ ReDraw: end the hold — left-click draws / edits the
-        CPR line again, exactly as before the hold (an armed Draw / an
-        unfinished trace continues; the hold never changed them)."""
-        was = self._cpr_tool_hold_on()
-        self._cpr_tool_hold = False
-        self._coronary_sync_ui()
-        if was:
-            self._cpr_hold_notice(True)
-
-    _CPR_NOTICE_MS = 1800
-
-    def _cpr_hold_notice(self, on: bool) -> None:
-        """Say in the middle of both images whether a plain left-click makes
-        CPR edit points now (user 2026-11-19): OFF when Rotate / Paging takes
-        the left button, ON after a right double-click (ReDraw). Large,
-        two lines, gone after a moment. Shown as a click-through floating
-        label (a child widget would hide under the GL canvas)."""
-        from PyQt6.QtCore import Qt, QTimer
-        from PyQt6.QtWidgets import QLabel
-        text = (t("CPRモードオン\n左クリックで編集点作成") if on
-                else t("CPRモードオフ\n左クリックで編集点作成なし"))
-        self._cpr_notice_last = (bool(on), text)          # (tests)
-        for lb in getattr(self, "_cpr_notice_lbls", []) or []:
-            try:
-                lb.close()
-                lb.deleteLater()
-            except Exception:                            # noqa: BLE001
-                pass
-        self._cpr_notice_lbls = []
-        col = "#2ecc71" if on else "#ff9f43"
-        for key in ("A", "B"):
-            try:
-                cv = self.pane[key].canvas
-            except Exception:                            # noqa: BLE001
-                continue
-            if cv is None or not cv.isVisible() or cv.width() < 40:
-                continue
-            lb = QLabel(text)
-            lb.setWindowFlags(Qt.WindowType.ToolTip
-                              | Qt.WindowType.FramelessWindowHint
-                              | Qt.WindowType.WindowStaysOnTopHint
-                              | Qt.WindowType.WindowTransparentForInput)
-            lb.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-            lb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            px = max(15, min(26, int(cv.width() / 18)))
-            lb.setStyleSheet(
-                f"QLabel {{ background:rgba(20,20,20,225); color:{col};"
-                f" border:3px solid {col}; border-radius:8px;"
-                f" padding:10px 18px; font-size:{px}px; font-weight:bold; }}")
-            lb.adjustSize()
-            c = cv.mapToGlobal(cv.rect().center())
-            lb.move(c.x() - lb.width() // 2, c.y() - lb.height() // 2)
-            lb.show()
-            self._cpr_notice_lbls.append(lb)
-        lbls = list(self._cpr_notice_lbls)
-
-        def _gone():
-            for lb in lbls:
-                try:
-                    lb.close()
-                    lb.deleteLater()
-                except Exception:                        # noqa: BLE001
-                    pass
-            if getattr(self, "_cpr_notice_lbls", None) == lbls:
-                self._cpr_notice_lbls = []
-        if lbls:
-            QTimer.singleShot(self._CPR_NOTICE_MS, _gone)
-
-    def _cpr_redraw_menu(self) -> bool:
-        """Right-click while on hold → a menu with 「ReDraw」. True = shown.
-
-        Right DOUBLE-click = ReDraw at once (user 2026-11-18): a second
-        right-click within the double-click interval of the menu opening —
-        anywhere, the mouse may have moved — closes the menu and resumes
-        drawing (no right-click ▸ aim ▸ left-click)."""
-        if not self._cpr_tool_hold_on():
-            return False
-        from PyQt6.QtCore import QElapsedTimer, QEvent, QObject, Qt
-        from PyQt6.QtGui import QCursor
-        from PyQt6.QtWidgets import QApplication, QMenu
-        menu = QMenu(self)
-        act = menu.addAction(t("ReDraw"))
-        clock = QElapsedTimer()
-        clock.start()
-        dbl = max(200, int(QApplication.doubleClickInterval()))
-        hit = {"dbl": False}
-
-        class _DoubleRight(QObject):
-            def eventFilter(self_, obj, ev):             # noqa: N802, N805
-                if (ev.type() in (QEvent.Type.MouseButtonPress,
-                                  QEvent.Type.MouseButtonDblClick)
-                        and ev.button() == Qt.MouseButton.RightButton
-                        and clock.elapsed() <= dbl):
-                    hit["dbl"] = True
-                    menu.close()
-                    return True
-                return False
-
-        flt = _DoubleRight(menu)
-        menu.installEventFilter(flt)
-        chosen = menu.exec(QCursor.pos())
-        if chosen is act or hit["dbl"]:
-            self._cpr_redraw()
-        return True
-
     def _cpr_auto_user_toggle(self, on) -> None:
         """Auto button clicked by the user: their choice wins (a Resume's
         automatic OFF is no longer undone on SaveNext / Save&Exit)."""
@@ -1206,7 +1072,6 @@ class CPRMixin:
         resumed trace does not re-trace (or auto-Fit) the whole line and wipe
         the hand corrections made to it. SaveNext / Save&Exit turn it back on
         (_cpr_resume_auto_restore)."""
-        self._cpr_tool_hold = False              # Resume = drawing again
         if self._cpr_auto_on():
             self._cpr_set_auto(False)
             self._cpr_auto_resume_off = True
@@ -1525,6 +1390,87 @@ class CPRMixin:
             out.append([(float((a - o) @ u), float((a - o) @ vv)),
                         (float((b - o) @ u), float((b - o) @ vv))])
         return out
+
+    #: fork candidate numbers (Auto-Track stopped at a fork)
+    _CPR_FORK_RGB = (255, 140, 0)
+
+    def _cpr_fork_label_pts(self, key) -> list:
+        """While Auto-Track waits at a fork (user 2026-11-25): the candidate
+        numbers 1, 2, … on pane *key* — [(text, (x, y))] in that pane's 2-D
+        coords (A = the short-axis section's in-plane mm, the map pane = its
+        output plane). Taken from each candidate's 3-D lumen centre on every
+        redraw, so they stay on the branch when the right pane is rotated."""
+        marks = getattr(self, "_cpr_fork_marks", None) or []
+        c = getattr(self, "_cpr", None)
+        if not marks or c is None:
+            return []
+        if (getattr(self, "_vr_on", None) or {}).get(key):
+            return []
+        out = []
+        try:
+            if key == "A":
+                o, u, vv, _n = (np.asarray(x, float)
+                                for x in self._cpr_frame())
+                for mk in marks:
+                    d3 = np.asarray(mk["c"], float) - o
+                    out.append((str(mk["n"]),
+                                (float(d3 @ u), float(d3 @ vv))))
+            elif key == c.get("src"):
+                for mk in marks:
+                    out.append((str(mk["n"]), tuple(map(float, (
+                        self._world3d_to_out(key, np.asarray(mk["c"],
+                                                             float)))))))
+        except Exception:                                # noqa: BLE001
+            return []
+        return out
+
+    def _cpr_fork_marks_set(self, fork) -> None:
+        """Show (fork list) / hide (None) the candidate numbers on both panes."""
+        self._cpr_fork_marks = ([{"n": k + 1, "c": list(map(float, f["c"]))}
+                                 for k, f in enumerate(fork)]
+                                if fork else [])
+        try:
+            self._refresh()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    #: colour of the right-pane (long-axis) plane line on the short axis
+    _CPR_MAP_LINE_RGB = (0, 200, 255)
+
+    def _cpr_map_plane_section_2d(self) -> list:
+        """The right (long-axis / map) pane's cutting plane as a line on the
+        current short-axis section (user 2026-11-25): a point set or moved on
+        the right pane moves within that plane, so the line shows on the left
+        pane which way it goes. One 2-point segment [(du, dv), (du, dv)] in
+        pane A in-plane mm, through the section; [] when there is no map MPR
+        (VR on the right, or the planes are parallel)."""
+        c = getattr(self, "_cpr", None)
+        if c is None or c.get("src") != "B":
+            return []
+        if (getattr(self, "_vr_on", None) or {}).get("B"):
+            return []
+        try:
+            o, u, vv, n = (np.asarray(x, float) for x in self._cpr_frame())
+            nb = np.asarray(self._axes_for("B")[2], float)
+            pb = np.asarray(self._pc["B"], float)
+        except Exception:                        # noqa: BLE001
+            return []
+        nb_n = float(np.linalg.norm(nb))
+        if nb_n < 1e-9:
+            return []
+        nb = nb / nb_n
+        # the plane's normal projected into the section: across the line
+        w2 = np.array([float(nb @ u), float(nb @ vv)])
+        s = float(np.hypot(*w2))
+        if s < 0.05:                             # (nearly) parallel planes
+            return []
+        w2 = w2 / s
+        d = float(nb @ (pb - o)) / s             # offset from the centre (mm)
+        cx, cy = d * w2[0], d * w2[1]
+        lx, ly = -w2[1], w2[0]                   # along the line
+        half = float(c.get("half", 20.0) or 20.0) * 1.5
+        return [[(cx - half * lx, cy - half * ly),
+                 (cx + half * lx, cy + half * ly)]]
 
     # (No low-contrast popup after an auto trace: the edit points in those
     # stretches are already marked on the short axis — the orange-red gap
@@ -2476,6 +2422,8 @@ class CPRMixin:
                                                            stop_detail)
         from multi_dicomviewer.ui.autotrack_progress import (
             AutoTrackProgress, show_result)
+        if getattr(self, "_cpr_fork_marks", None):
+            return None                  # a fork choice is still open
         m = self._measures[which][mi]
         p3 = np.asarray(m.get("pts3d") or [], float)
         if len(p3) < 2:
@@ -2531,7 +2479,7 @@ class CPRMixin:
             return not (pg is not None and pg.cancelled())
 
         try:
-            with AutoTrackProgress(self.window()) as pg:
+            with AutoTrackProgress(self.window(), anchor=self) as pg:
                 pg_ref["pg"] = pg
                 res = extend_vessel(self._vol, self._dims, p3,
                                     cancel=pg.cancelled, progress=pg.update,
@@ -2593,6 +2541,8 @@ class CPRMixin:
         if keep is not None:
             extras.append(t("中心を指定して続ける"))
         out["extras"] = extras
+        if fork and keep is not None:
+            self._cpr_fork_marks_set(fork)       # 1, 2, … on both panes
         try:
             if shell is not None and hasattr(shell,
                                              "coronary_auto_extend_report"):
@@ -2603,9 +2553,12 @@ class CPRMixin:
                 out["chosen"] = show_result(
                     self.window(),
                     CoronaryTreeWindow.auto_extend_text(t("CPR線"), out),
-                    ok=res.stop != "fork", extra=extras)
+                    ok=res.stop != "fork", extra=extras,
+                    modeless=bool(out.get("fork")))
         except Exception:                                # noqa: BLE001
             traceback.print_exc()
+        if getattr(self, "_cpr_fork_marks", None):
+            self._cpr_fork_marks_set(None)
         ch = out.get("chosen", -1)
         ch = ch if isinstance(ch, int) and not isinstance(ch, bool) else -1
         if keep is not None and 0 <= ch < len(fork):
@@ -2831,10 +2784,8 @@ class CPRMixin:
             "type": getattr(self, "_meas_type", None),
             "draft": d if (d and d.get("type") == "polyline") else None,
             "pending": bool(getattr(self, "_coronary_mpr_pending", False)),
-            "hold": bool(getattr(self, "_cpr_tool_hold", False)),
         }
         self._coronary_mpr_pending = False
-        self._cpr_tool_hold = False
         if hasattr(self, "_coronary_sync_ui"):
             try:
                 self._coronary_sync_ui()
@@ -2855,7 +2806,6 @@ class CPRMixin:
             if st["draft"] is not None:
                 self._draft = st["draft"]
             self._coronary_mpr_pending = st["pending"]
-            self._cpr_tool_hold = st["hold"]
         finally:
             self._cpr_lasso_restoring = False
         if hasattr(self, "_coronary_sync_ui"):

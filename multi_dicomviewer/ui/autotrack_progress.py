@@ -1,13 +1,17 @@
 """Progress + result dialogs of the CPR Auto-Track (user 2026-11-18): the
 trace runs in the foreground, so a progress window shows what it is doing
 (trunk mm / branch k of n / total mm) with a 停止 button, and the result is
-always shown in a dialog (also when nothing was found, with the reason)."""
+always shown in a dialog (also when nothing was found, with the reason).
+
+While it runs a large red 「■ Auto-Track 停止」 button floats over the top of
+the images (user 2026-11-25: how to stop was not obvious) — the progress
+window's 停止 and a right-click anywhere stop it too."""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QEvent, QObject, Qt
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QProgressDialog,
-                             QWidget)
+                             QPushButton, QWidget)
 
 from multi_dicomviewer.i18n import t
 
@@ -28,9 +32,9 @@ class _RightClickStop(QObject):
         try:
             if ev.type() not in self._MOUSE or not isinstance(obj, QWidget):
                 return False
-            dlg = self._owner._dlg
-            if dlg is not None and (obj is dlg or dlg.isAncestorOf(obj)):
-                return False                         # the 停止 button etc.
+            for w in (self._owner._dlg, self._owner._stop_btn):
+                if w is not None and (obj is w or w.isAncestorOf(obj)):
+                    return False                     # the 停止 buttons etc.
             if (ev.type() == QEvent.Type.MouseButtonPress
                     and ev.button() == Qt.MouseButton.RightButton):
                 self._owner._on_cancel()
@@ -43,10 +47,19 @@ class AutoTrackProgress:
     """``with AutoTrackProgress(parent) as pg: extend_vessel(...,
     cancel=pg.cancelled, progress=pg.update)``."""
 
-    def __init__(self, parent=None, name: str = ""):
+    _STOP_STYLE = (
+        "QPushButton { background:#d62828; color:white; font-weight:bold;"
+        " font-size:%dpx; border:3px solid #7a0d0d; border-radius:10px;"
+        " padding:8px 26px; }"
+        "QPushButton:hover { background:#e63946; }"
+        "QPushButton:pressed { background:#9b1c1c; }")
+
+    def __init__(self, parent=None, name: str = "", anchor=None):
         self._parent = parent
         self._name = name
+        self._anchor = anchor          # the image area the stop button sits on
         self._dlg = None
+        self._stop_btn = None
         self._cancel = False
         self._filter = None
 
@@ -62,6 +75,9 @@ class AutoTrackProgress:
         d.setAutoClose(False)
         d.setAutoReset(False)
         d.canceled.connect(self._on_cancel)
+        cb = d.findChild(QPushButton)
+        if cb is not None:                       # the dialog's 停止: red too
+            cb.setStyleSheet(self._STOP_STYLE % 13)
         d.show()
         # keep the panes visible (the trace is watched step by step): the
         # window sits at the top-left of the main window, over the toolbar
@@ -74,6 +90,7 @@ class AutoTrackProgress:
             pass
         QApplication.processEvents()
         self._dlg = d
+        self._show_stop_button()
         app = QApplication.instance()
         if app is not None:
             self._filter = _RightClickStop(self)
@@ -81,12 +98,43 @@ class AutoTrackProgress:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         return self
 
+    def _show_stop_button(self) -> None:
+        """The big red stop button, floating at the top centre of the image
+        area (a frameless always-on-top tool window: a child widget would
+        hide under the GL canvas)."""
+        try:
+            area = self._anchor or (self._parent.window()
+                                    if self._parent is not None else None)
+            b = QPushButton(t("■ Auto-Track 停止"))
+            b.setWindowFlags(Qt.WindowType.Tool
+                             | Qt.WindowType.FramelessWindowHint
+                             | Qt.WindowType.WindowStaysOnTopHint)
+            b.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(t("右クリックでも停止できます"))
+            b.setStyleSheet(self._STOP_STYLE % 20)
+            b.clicked.connect(self._on_cancel)
+            b.adjustSize()
+            if area is not None:
+                top = area.mapToGlobal(area.rect().topLeft())
+                b.move(top.x() + (area.width() - b.width()) // 2,
+                       top.y() + 14)
+            b.show()
+            b.raise_()
+            self._stop_btn = b
+        except Exception:                                # noqa: BLE001
+            self._stop_btn = None
+
     def __exit__(self, *exc):
         QApplication.restoreOverrideCursor()
         app = QApplication.instance()
         if app is not None and self._filter is not None:
             app.removeEventFilter(self._filter)
         self._filter = None
+        if self._stop_btn is not None:
+            self._stop_btn.close()
+            self._stop_btn.deleteLater()
+            self._stop_btn = None
         if self._dlg is not None:
             self._dlg.close()
             self._dlg.deleteLater()
@@ -95,6 +143,9 @@ class AutoTrackProgress:
 
     def _on_cancel(self):
         self._cancel = True
+        if self._stop_btn is not None:           # show that it was heard
+            self._stop_btn.setEnabled(False)
+            self._stop_btn.setText(t("停止中…"))
 
     def cancelled(self) -> bool:
         return self._cancel
@@ -115,10 +166,13 @@ class AutoTrackProgress:
         QApplication.processEvents()
 
 
-def show_result(parent, text: str, ok: bool = True, extra=""):
+def show_result(parent, text: str, ok: bool = True, extra="",
+                modeless: bool = False):
     """The Auto-Track result, always in a dialog. *extra* = one button text
     (→ returns True when chosen) or a list of them (→ returns the index of
-    the one chosen, -1 for OK)."""
+    the one chosen, -1 for OK). *modeless*: the windows behind stay usable
+    while it waits (a fork — the right pane can be rotated to compare the
+    numbered candidates); it still returns only once answered."""
     many = isinstance(extra, (list, tuple))
     labels = list(extra) if many else ([extra] if extra else [])
     if not labels:
@@ -133,7 +187,16 @@ def show_result(parent, text: str, ok: bool = True, extra=""):
     btns = [box.addButton(s, QMessageBox.ButtonRole.AcceptRole)
             for s in labels]
     box.addButton(QMessageBox.StandardButton.Ok)
-    box.exec()
+    if modeless:
+        from PyQt6.QtCore import QEventLoop
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        loop = QEventLoop()
+        box.finished.connect(loop.quit)
+        box.show()
+        box.raise_()
+        loop.exec()
+    else:
+        box.exec()
     hit = box.clickedButton()
     k = next((i for i, b in enumerate(btns) if b is hit), -1)
     return k if many else k == 0

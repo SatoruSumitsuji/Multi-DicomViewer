@@ -8,7 +8,10 @@ Predict → search → correct (user 2026-11-18, rebuilt):
 2. Search: the cross-section ⟂ the course at Q, radius 5 mm. Lumen regions
    (above the half-max threshold) are measured: inscribed-circle radius,
    centre (two vessels merged in one region near a carina are split by
-   their inscribed-circle peaks), mean HU. A region counts only if
+   their inscribed-circle peaks), mean HU. Its centre is the centre of
+   the whole bright round shape, taken with a wider HU window (from
+   bg + 30 % of the contrast, calcium left out — user 2026-11-25).
+   A region counts only if
    - the straight segment from the current centre to it stays in the lumen
      (a vessel 2 mm away across fat — a vein, a neighbour — is not taken),
    - it is not on something already traced,
@@ -77,6 +80,15 @@ class ExtendParams:
     ask_at_fork: bool = True       # trunk: ≥ 2 lumens in the section → stop
     #                                and let the user choose (no auto choice)
     half_frac: float = 0.5         # lumen threshold = bg + f·(lumen − bg)
+    # The CENTRE of a found lumen is taken with a WIDER HU window (user
+    # 2026-11-25: "the centre of the bright round shape, with a wider CT
+    # range"): every voxel above bg + center_frac·(lumen − bg) of the lumen
+    # around the inscribed circle (its partial-volume rim too, so the round
+    # shape is whole and the centre is not pulled to the brightest side),
+    # weights saturating at the lumen HU; calcium (above lumen +
+    # center_hi_frac·(lumen − bg)) is left out.
+    center_frac: float = 0.3
+    center_hi_frac: float = 0.8
     hu_frac: float = 0.6           # region mean HU ≥ bg + f·(lumen − bg)
     bridge_frac: float = 0.25      # bridged gap's weakest ≥ bg + f·contrast
     min_contrast_hu: float = 120.0  # lumen − background must exceed this
@@ -167,10 +179,15 @@ def _r3(a):
     return [round(float(x), 2) for x in np.asarray(a, float).ravel()]
 
 
-def _regions(V, Q, d, thr, R=5.0, h=0.25):
+def _regions(V, Q, d, thr, R=5.0, h=0.25, lo=None, cap=None, hi=None):
     """Lumen regions of the section ⟂ *d* at *Q* (disc radius *R*):
     [{c (world), r (inscribed radius), hu, big, area}]. A region holding
-    two vessels (merged near a carina) gives one entry per vessel."""
+    two vessels (merged near a carina) gives one entry per vessel.
+
+    *lo* / *cap* / *hi* (HU): the centre is taken with the wider window
+    (see ExtendParams.center_frac) — the voxels above *lo* connected to the
+    vessel within its circle, weighted min(HU − lo, cap − lo), none above
+    *hi*. Without them: the HU-weighted centre above *thr* (as before)."""
     u, v = _frame(d)
     g = np.arange(-R, R + 1e-6, h)
     A, B = np.meshgrid(g, g, indexing="ij")
@@ -223,17 +240,58 @@ def _regions(V, Q, d, thr, R=5.0, h=0.25):
         for ij in keep:
             e = float(edt[ij[0], ij[1]])
             a0, b0 = A[ij[0], ij[1]], B[ij[0], ij[1]]
-            disc = comp & (np.hypot(A - a0, B - b0) <= e + 0.5)
-            w = np.clip(img - thr, 0, None) * disc
-            s = float(w.sum())
-            ca, cb = ((float((w * A).sum() / s), float((w * B).sum() / s))
-                      if s > 0 else (a0, b0))
+            if lo is not None and lo < thr:
+                ca, cb = _wide_centre(img, A, B, rr, R, ij, e, lo,
+                                      cap if cap is not None else thr, hi)
+            else:
+                disc = comp & (np.hypot(A - a0, B - b0) <= e + 0.5)
+                w = np.clip(img - thr, 0, None) * disc
+                s = float(w.sum())
+                ca, cb = ((float((w * A).sum() / s),
+                           float((w * B).sum() / s)) if s > 0 else (a0, b0))
             core = comp & (np.hypot(A - ca, B - cb) <= max(0.5, 0.6 * e))
             hu = float(img[core].mean()) if core.any() else float(
                 img[ij[0], ij[1]])
             out.append({"c": Q + ca * u + cb * v, "r": e + 0.5 * h, "hu": hu,
                         "big": big, "area": area})
     return out
+
+
+def _wide_centre(img, A, B, rr, R, ij, e, lo, cap, hi):
+    """Centre of the round bright shape around the inscribed-circle peak
+    *ij* (radius *e*) with the wider window *lo* … *hi*: the voxels above
+    *lo* connected to the peak, within a circle of e + 1 mm that is moved
+    onto the centre found (twice), weighted min(HU − lo, cap − lo)."""
+    a0, b0 = float(A[ij[0], ij[1]]), float(B[ij[0], ij[1]])
+    m = (img > lo) & (rr <= R)
+    if hi is not None:
+        # calcium and its blooming rim (~1 mm) are not lumen
+        calc = img >= hi
+        if calc.any():
+            h = float(abs(A[1, 0] - A[0, 0])) or 0.25
+            m &= ~ndimage.binary_dilation(
+                calc, iterations=max(1, int(round(1.0 / h))))
+    lab, _n = ndimage.label(m)
+    # the part of the window that fills most of the inscribed circle (the
+    # peak itself may sit in a calcium rim that was taken out)
+    inn = lab[(np.hypot(A - a0, B - b0) <= e) & (lab > 0)]
+    if inn.size == 0:
+        return a0, b0
+    comp = lab == int(np.bincount(inn).argmax())
+    wv = np.clip(img - lo, 0.0, max(1.0, cap - lo))
+    ca, cb = a0, b0
+    for _ in range(3):
+        disc = comp & (np.hypot(A - ca, B - cb) <= e + 1.0)
+        w = wv * disc
+        s = float(w.sum())
+        if s <= 0:
+            break
+        na, nb = float((w * A).sum() / s), float((w * B).sum() / s)
+        # never wander off the vessel: stay within its inscribed circle
+        if np.hypot(na - a0, nb - b0) > max(0.5, e):
+            break
+        ca, cb = na, nb
+    return ca, cb
 
 
 def _smooth_min(val, k=3):
@@ -311,7 +369,8 @@ class _Tracer:
         Returns (cands, chamber, n_traced)."""
         prm = self.p
         Q = P + s * d
-        regs = _regions(self.V, Q, d, thr, prm.search_mm, prm.grid_mm)
+        regs = _regions(self.V, Q, d, thr, prm.search_mm, prm.grid_mm,
+                        **self._cw(lumen))
         out, chamber, n_tr = [], False, 0
         hu_min = self.bg + prm.hu_frac * (lumen - self.bg)
         conn = self._conn(lumen)
@@ -395,7 +454,8 @@ class _Tracer:
         out = []
         for i in picked:
             Qr = P + prm.ray_mm * W[i]
-            regs = _regions(self.V, Qr, W[i], thr, 2.5, prm.grid_mm)
+            regs = _regions(self.V, Qr, W[i], thr, 2.5, prm.grid_mm,
+                            **self._cw(lumen))
             if not regs:
                 continue
             g = min(regs, key=lambda x: np.linalg.norm(x["c"] - Qr))
@@ -430,11 +490,16 @@ class _Tracer:
     def _conn(self, lumen) -> float:
         return self.bg + self.p.conn_frac * (lumen - self.bg)
 
+    def _cw(self, lumen) -> dict:
+        """The wider centring window for _regions (ExtendParams.center_*)."""
+        return _centre_window(self.bg, lumen, self.p)
+
     def _refine(self, P, c, thr, lumen):
         """Re-take the centre in the section ⟂ the corrected course."""
         w = _unit(c - P)
         s = float(np.linalg.norm(c - P))
-        regs = _regions(self.V, P + s * w, w, thr, 2.5, self.p.grid_mm)
+        regs = _regions(self.V, P + s * w, w, thr, 2.5, self.p.grid_mm,
+                        **self._cw(lumen))
         if not regs:
             return None
         g = min(regs, key=lambda x: np.linalg.norm(x["c"] - c))
@@ -466,7 +531,8 @@ class _Tracer:
         prm = self.p
         far = prm.bridge_steps * prm.step_mm
         Q = P + far * d
-        regs = _regions(self.V, Q, d, thr, 2.5, prm.grid_mm)
+        regs = _regions(self.V, Q, d, thr, 2.5, prm.grid_mm,
+                        **self._cw(lumen))
         floor = self.bg + prm.bridge_frac * (lumen - self.bg)
         hu_min = self.bg + prm.hu_frac * (lumen - self.bg)
         for g in sorted(regs, key=lambda x: np.linalg.norm(x["c"] - Q)):
@@ -715,6 +781,14 @@ def _duplicate(path, others, tol=1.5, frac=0.6) -> bool:
     return False
 
 
+def _centre_window(bg, lumen, prm) -> dict:
+    c = float(lumen) - float(bg)
+    if c <= 0:
+        return {}
+    return {"lo": float(bg) + prm.center_frac * c, "cap": float(lumen),
+            "hi": float(lumen) + prm.center_hi_frac * c}
+
+
 def _arc_point(C, back_mm):
     """The point *back_mm* before the end along polyline *C*."""
     C = np.asarray(C, float)
@@ -795,7 +869,8 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     # start from the lumen centre near the last point (a click slightly
     # off-centre would break the "connected" test of the first step)
     P0 = C[-1].copy()
-    regs = _regions(V, P0, d, thr, 2.5, prm.grid_mm)
+    regs = _regions(V, P0, d, thr, 2.5, prm.grid_mm,
+                    **_centre_window(bg, lumen, prm))
     if regs:
         g = min(regs, key=lambda x: np.linalg.norm(x["c"] - P0))
         if np.linalg.norm(g["c"] - P0) < 1.5 and not g["big"]:

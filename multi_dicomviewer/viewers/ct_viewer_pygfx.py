@@ -42,7 +42,8 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen,
+    QColor, QCursor, QFont, QFontMetricsF, QImage, QKeySequence, QPainter,
+    QPainterPath, QPen,
     QPolygonF, QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -865,12 +866,14 @@ class _Overlay(QWidget):
         # control-point marker instead of the normal MPR crosshair / measures.
         if v._cpr is not None and key == "A":
             self._paint_cpr(p, w, h)
+            self._paint_cpr_forks(p, key)
             self._paint_info(p, key, w, h)
             return
         if v._cl_on and not v._lv_cross_paint_suppressed():
             self._paint_cross(p, key, w, h)
         self._paint_coronary(p, key, w, h)
         self._paint_measures(p, key, w, h)
+        self._paint_cpr_forks(p, key)
         if v._lv is not None:
             self._paint_lv(p, key, w, h)
         if v._lvv is not None:
@@ -1262,6 +1265,37 @@ class _Overlay(QWidget):
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                    f"WW {_ww:.0f}  WL {_wl:.0f}")
 
+    def _paint_cpr_forks(self, p, key) -> None:
+        """Auto-Track waiting at a fork: a ring + the number 1, 2, … beside
+        each candidate lumen (short axis and long-axis pane; re-placed from
+        3-D on every paint, so they follow a rotated right pane)."""
+        v = self._v
+        pts = v._cpr_fork_label_pts(key)
+        if not pts:
+            return
+        col = QColor(*v._CPR_FORK_RGB)
+        f = QFont()
+        f.setPointSize(17)
+        f.setBold(True)
+        p.setFont(f)
+        fm = QFontMetricsF(f)
+        for text, (x, y) in pts:
+            if key == "A":
+                sx, sy = v._cpr_offset_to_screen(x, y)
+            else:
+                sx, sy = v._world_to_screen(key, x, y)
+            p.setPen(QPen(col, 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(sx, sy), 9.0, 9.0)
+            tw = fm.horizontalAdvance(text) + 10
+            th = fm.height() + 2
+            box = QRectF(sx + 10, sy - 8 - th, tw, th)
+            p.setPen(QPen(col, 1.5))
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(box, 4, 4)
+            _draw_outlined_text(p, box, int(Qt.AlignmentFlag.AlignCenter),
+                                text, col, width=1.0)
+
     def _paint_cpr(self, p, w, h):
         """Short-axis overlay: a centred amber crosshair (the cross-section is
         centred on the vessel) plus the nearest control-point marker as a
@@ -1277,6 +1311,15 @@ class _Overlay(QWidget):
         # in-plane. On an interpolated section → a HOLLOW yellow ring at the
         # spline centre (not editable; Alt+F/A steps to an edit point, or
         # right-click ▸ Add Point).
+        # The right (long-axis) pane's plane as a dashed line: a point set /
+        # moved there moves along this line in the section.
+        for (a, b) in v._cpr_map_plane_section_2d():
+            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, 190), 1.4)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            ax_, ay_ = v._cpr_offset_to_screen(*a)
+            bx_, by_ = v._cpr_offset_to_screen(*b)
+            p.drawLine(QPointF(ax_, ay_), QPointF(bx_, by_))
         epi = v._cpr_epi_section_2d()             # CPR row → Epi (short axis)
         if epi:
             p.setPen(QPen(QColor(*v._CPR_EPI_RGB), 1.6))
@@ -3624,12 +3667,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 QTimer.singleShot(
                     0, lambda sx=x, sy=y: self._cpr_context_menu(sx, sy))
                 return
-            # Draw on hold (Rotate / Paging) → 「ReDraw」 resumes drawing.
-            # Deferred out of the pointer handler (modal safety).
-            if self._cpr_tool_hold_on():
-                self._reset_pointer_state()
-                QTimer.singleShot(0, self._cpr_redraw_menu)
-                return
             # The MV / AoV line (detected outline or ring) → 描き直す menu
             # (deferred out of the pointer handler, like the menus below).
             _vh = self._lv_valve_hit(key, x, y)
@@ -3727,9 +3764,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (Windows) viewer. _alt_tool keeps _on_move on the tool path for the
         # rest of the drag (Alt may be released mid-gesture).
         _mods = ev.get("modifiers") or ()
-        # Draw on hold (Rotate / Paging picked while setting CPR lines) = Alt:
-        # the left-click runs the tool, never adds / grabs a point.
-        _alt = "Alt" in _mods or self._cpr_tool_hold_on()
+        _alt = "Alt" in _mods
         self._alt_tool = bool(self._meas_on and _alt and self._drag_btn == 1)
         if self._meas_on and not _alt:
             self._cross_grab = False
@@ -3801,7 +3836,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # There is no MPR crosshair on the cross-section, so never grab it.
         if self._cpr is not None and key == "A":
             if self._drag_btn == 1:
-                if not self._cpr_tool_hold_on() and self._cpr_grab(x, y):
+                if self._cpr_grab(x, y):
                     # A near-marker press grabs the edit point to drag. In EDIT
                     # mode (idle Measure, no Alt) ALSO jump it to the click right
                     # now, so even a SINGLE click very close to the marker moves
@@ -4199,8 +4234,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # the "hold Alt to adjust the view mid-trace" concept. A PLAIN
         # double-click in Measure mode still finishes the polyline draft.
         _mods = ev.get("modifiers") or ()
-        if (self._meas_on and "Shift" not in _mods and "Alt" not in _mods
-                and not self._cpr_tool_hold_on()):
+        if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
             # During a coronary CPR centreline trace, a PLAIN double-click must
             # NOT finish the polyline. Two deliberate point-clicks placed quickly
             # (click-release-click) can be read by the OS as a double-click, which
@@ -4881,7 +4915,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-        self._cpr_tool_hold_check(name)     # Rotate/Paging → Draw on hold
         self._refresh_tool_availability()
 
     def _refresh_tool_availability(self):
@@ -20010,11 +20043,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_draw_btn.setChecked(pend)
             # Red "armed" background while tracing (matches the LV trace buttons)
             # so it's obvious Draw is active / a CPR is being created.
-            # On hold (Rotate / Paging picked): pale dashed = paused, resume
-            # with right-click ▸ ReDraw (or this button).
             self._cpr_draw_btn.setStyleSheet(
-                ("background:#f6d5d0;color:#7a1f14;border:1px dashed #c0392b;" if self._cpr_tool_hold_on()
-                 else self._LV_STY["trace"]) if pend else self._BTN_DIS)
+                self._LV_STY["trace"] if pend else self._BTN_DIS)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()
@@ -20062,15 +20092,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         so a left-drag traces the vessel centreline."""
         if self._cpr_lasso_restore():
             return                                   # back from a Polygon lasso
-        if self._cpr_tool_hold_on() and getattr(
-                self, "_coronary_mpr_pending", False):
-            self._cpr_redraw()                       # on hold → resume, not disarm
-            return
         if self._vol is None or self._mode != "3D":
             self._coronary_sync_ui()
             return
         self._coronary_mode = True
-        self._cpr_tool_hold = False
         if getattr(self, "_coronary_mpr_pending", False):
             self._coronary_mpr_pending = False
             self._cpr_vr_stop()                      # VR始点 only while tracing
@@ -20097,7 +20122,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         DELETE the traced centreline polyline, and hide the row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
-        self._cpr_tool_hold = False                   # no Draw hold left
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks

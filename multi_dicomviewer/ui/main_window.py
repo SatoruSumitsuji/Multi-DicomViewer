@@ -4133,7 +4133,7 @@ class MainWindow(QMainWindow):
         from multi_dicomviewer.ui.autotrack_progress import (
             AutoTrackProgress, show_result)
         try:
-            with AutoTrackProgress(self) as pg:
+            with AutoTrackProgress(self, anchor=viewer) as pg:
                 out = w.auto_extend(vid, getattr(viewer, "_vol", None),
                                     getattr(viewer, "_dims", None),
                                     folder=self._viewer_next_dir(viewer),
@@ -4200,7 +4200,10 @@ class MainWindow(QMainWindow):
         out["chosen"] = show_result(
             self, txt, ok=(not out.get("lost") and out["stop"] != "fork"
                            and bool(out["trunk_mm"] or out["branches"])),
-            extra=list(out.get("extras") or []))
+            extra=list(out.get("extras") or []),
+            # a fork: the panes stay usable (rotate to compare the numbered
+            # candidates) while the choice waits
+            modeless=bool(out.get("fork")))
 
     def _ct_leave_to_standard(self, viewer, kinds) -> None:
         """Before *kinds* stop being loaded on *viewer*: leave a mode that

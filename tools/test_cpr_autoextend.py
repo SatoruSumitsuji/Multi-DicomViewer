@@ -434,6 +434,25 @@ check("右クリックで停止: right-click stops; left clicks swallowed meanwh
       not c_left and c_right and _got_left == [_Qt.MouseButton.LeftButton],
       (c_left, c_right, _got_left))
 
+# the big red 「■ Auto-Track 停止」 button over the images (user 2026-11-25)
+from multi_dicomviewer.i18n import t  # noqa: E402
+spy.move(300, 300)
+with _atp.AutoTrackProgress(None, anchor=spy) as _pg:
+    sb = _pg._stop_btn
+    sb_shown = (sb is not None and sb.isVisible()
+             and sb.text() == t("■ Auto-Track 停止")
+             and "#d62828" in sb.styleSheet())
+    top = spy.mapToGlobal(spy.rect().topLeft())
+    at_top = sb is not None and abs(sb.y() - (top.y() + 14)) <= 2
+    from PyQt6.QtTest import QTest  # noqa: E402
+    QTest.mouseClick(sb, _Qt.MouseButton.LeftButton)
+    c_btn = _pg.cancelled()
+    heard = (not sb.isEnabled()) and sb.text() == t("停止中…")
+check("Auto-Track: a big red stop button is shown over the images",
+      sb_shown and at_top, (sb_shown, at_top))
+check("… clicking it stops (and it says 停止中…)", c_btn and heard)
+check("… it is gone afterwards", _pg._stop_btn is None)
+
 
 class RCHost(Host):
     """a right-click arrives while the 6th step is being shown"""
