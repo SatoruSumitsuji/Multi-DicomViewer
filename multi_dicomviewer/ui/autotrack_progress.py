@@ -49,8 +49,8 @@ class AutoTrackProgress:
 
     _STOP_STYLE = (
         "QPushButton { background:#d62828; color:white; font-weight:bold;"
-        " font-size:%dpx; border:3px solid #7a0d0d; border-radius:10px;"
-        " padding:8px 26px; }"
+        " font-size:%dpx; border:2px solid #7a0d0d; border-radius:7px;"
+        " padding:%s; }"
         "QPushButton:hover { background:#e63946; }"
         "QPushButton:pressed { background:#9b1c1c; }")
 
@@ -77,7 +77,7 @@ class AutoTrackProgress:
         d.canceled.connect(self._on_cancel)
         cb = d.findChild(QPushButton)
         if cb is not None:                       # the dialog's 停止: red too
-            cb.setStyleSheet(self._STOP_STYLE % 13)
+            cb.setStyleSheet(self._STOP_STYLE % (13, "4px 14px"))
         d.show()
         # keep the panes visible (the trace is watched step by step): the
         # window sits at the top-left of the main window, over the toolbar
@@ -98,13 +98,35 @@ class AutoTrackProgress:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         return self
 
+    def _area_rect(self):
+        """Global rect the stop button is centred on: the union of the
+        anchor widgets (the left + right image panes) — so it sits between
+        the two images, just below their top."""
+        from PyQt6.QtCore import QRect
+        anc = self._anchor
+        if anc is None:
+            anc = self._parent.window() if self._parent is not None else None
+        if anc is None:
+            return None
+        ws = list(anc) if isinstance(anc, (list, tuple)) else [anc]
+        rect = None
+        for w in ws:
+            try:
+                if w is None or not w.isVisible():
+                    continue
+                g = QRect(w.mapToGlobal(w.rect().topLeft()), w.size())
+                rect = g if rect is None else rect.united(g)
+            except Exception:                            # noqa: BLE001
+                continue
+        return rect
+
     def _show_stop_button(self) -> None:
-        """The big red stop button, floating at the top centre of the image
-        area (a frameless always-on-top tool window: a child widget would
-        hide under the GL canvas)."""
+        """The red stop button, floating between the two images just below
+        their top (user 2026-11-25: closer, smaller) — a frameless
+        always-on-top tool window: a child widget would hide under the GL
+        canvas."""
         try:
-            area = self._anchor or (self._parent.window()
-                                    if self._parent is not None else None)
+            area = self._area_rect()
             b = QPushButton(t("■ Auto-Track 停止"))
             b.setWindowFlags(Qt.WindowType.Tool
                              | Qt.WindowType.FramelessWindowHint
@@ -112,13 +134,12 @@ class AutoTrackProgress:
             b.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(t("右クリックでも停止できます"))
-            b.setStyleSheet(self._STOP_STYLE % 20)
+            b.setStyleSheet(self._STOP_STYLE % (14, "4px 14px"))
             b.clicked.connect(self._on_cancel)
             b.adjustSize()
             if area is not None:
-                top = area.mapToGlobal(area.rect().topLeft())
-                b.move(top.x() + (area.width() - b.width()) // 2,
-                       top.y() + 14)
+                b.move(area.x() + (area.width() - b.width()) // 2,
+                       area.y() + 10)
             b.show()
             b.raise_()
             self._stop_btn = b

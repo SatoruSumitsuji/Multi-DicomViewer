@@ -20748,6 +20748,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_search_ring = None                  # no Auto-Track ring left
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
@@ -21551,20 +21552,29 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 p.ren.RemoveActor(a)
             p.fork_lbls = []
             pts = self._cpr_fork_label_pts(key)
-            for text, (x, y) in pts:
+            short = key == "A"
+            spread = ([0.0] * len(pts) if short else self._cpr_spread_px(
+                [self._world_to_qt(key, x, y) for _t, (x, y) in pts]))
+            for (text, (x, y)), dx in zip(pts, spread):
                 ta = vtkBillboardTextActor3D()
                 ta.SetInput(text)
                 ta.SetPosition(float(x), float(y), 0.8)
-                ta.SetDisplayOffset(10, 8)       # beside the lumen, not on it
                 tp = ta.GetTextProperty()
                 tp.SetColor(r, g, b)
-                tp.SetFontSize(26)
                 tp.SetBold(True)
                 tp.SetShadow(True)
-                tp.SetFrame(True)
-                tp.SetFrameColor(r, g, b)
-                tp.SetBackgroundColor(0.0, 0.0, 0.0)
-                tp.SetBackgroundOpacity(0.65)
+                if short:                        # beside its ring, framed
+                    ta.SetDisplayOffset(10, 8)
+                    tp.SetFontSize(26)
+                    tp.SetFrame(True)
+                    tp.SetFrameColor(r, g, b)
+                    tp.SetBackgroundColor(0.0, 0.0, 0.0)
+                    tp.SetBackgroundOpacity(0.65)
+                else:                            # long axis: small, ON the
+                    ta.SetDisplayOffset(int(round(dx)), 0)
+                    tp.SetFontSize(15)           # candidate's centre (3 mm
+                    tp.SetJustificationToCentered()   # ahead), no frame
+                    tp.SetVerticalJustificationToCentered()
                 p.ren.AddActor(ta)
                 p.fork_lbls.append(ta)
             if had or pts:
@@ -21628,7 +21638,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         epi = self._cpr_epi_section_2d()          # CPR row → Epi (short axis)
         mapl = self._cpr_map_plane_section_2d()    # right-pane plane line
         forks = self._cpr_fork_label_pts("A")      # fork candidates (rings)
-        if hollow or gap or epi or mapl or forks:
+        srch = self._cpr_search_ring_2d()          # Auto-Track search range
+        if hollow or gap or epi or mapl or forks or srch:
             dpr = max(1.0, p.canvas.devicePixelRatioF())
             ps = p.ren.GetActiveCamera().GetParallelScale()
             h_phys = max(1.0, p.canvas.height() * dpr)
@@ -21645,7 +21656,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 cols += [self._CPR_EPI_RGB + (255,)] * len(epi)
             if mapl:                             # the right pane's plane
                 rings = list(rings) + list(mapl)
-                cols += [self._CPR_MAP_LINE_RGB + (255,)] * len(mapl)
+                cols += [self._CPR_MAP_LINE_RGB + (128,)] * len(mapl)
+            if srch:                             # the search disc
+                sr = _ring_polylines([srch[0]], srch[1], seg=72)
+                rings = list(rings) + list(sr)
+                cols += [self._CPR_SEARCH_RGB + (150,)] * len(sr)
             if forks:                            # fork candidates: a ring
                 fr = _ring_polylines([q for _t, q in forks],
                                      ring_r_world * 2.2)
@@ -21702,11 +21717,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
-        # On the DISTAL edit point (CoronaryTree work): move it to the
-        # clicked lumen centre and Auto-Track on from there.
+        # On the DISTAL edit point (CoronaryTree work): Auto-Track goes on
+        # from that point AS IT IS (user 2026-11-25: right-click = resume
+        # only; its position is adjusted with a left-click beforehand).
         a_at = None
         if self._cpr_autotrack_center_ok():
-            a_at = menu.addAction(t("ここを中心に Auto-Track"))
+            a_at = menu.addAction(t("Auto-Track 再開"))
             menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an
@@ -21719,18 +21735,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a_del = menu.addAction(t("Delete Point") if on_pt
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)
-        restore = None
-        if a_at is not None:              # yellow marker → the clicked spot
-            o, u, vv, _n = self._cpr_frame()
-            du, dv = self._disp_to_world("A", sx, sy)
-            restore = self._cpr_center_preview(o + du * u + dv * vv)
         act = menu.exec(QCursor.pos())
-        if restore is not None:
-            restore()                     # the chosen action decides
         if a_at is not None and act is a_at:
-            o, u, vv, _n = self._cpr_frame()
-            du, dv = self._disp_to_world("A", sx, sy)
-            self._cpr_autotrack_from_section(o + du * u + dv * vv)
+            self._cpr_autotrack_resume()  # from the point as it is now
         elif act is a_add:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._disp_to_world("A", sx, sy)

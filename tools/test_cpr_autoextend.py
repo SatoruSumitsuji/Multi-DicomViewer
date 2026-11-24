@@ -434,22 +434,35 @@ check("右クリックで停止: right-click stops; left clicks swallowed meanwh
       not c_left and c_right and _got_left == [_Qt.MouseButton.LeftButton],
       (c_left, c_right, _got_left))
 
-# the big red 「■ Auto-Track 停止」 button over the images (user 2026-11-25)
+# the red 「■ Auto-Track 停止」 button between the two images, just below
+# their top, not too big (user 2026-11-25)
 from multi_dicomviewer.i18n import t  # noqa: E402
+from PyQt6.QtWidgets import QWidget as _QW  # noqa: E402
+spy.resize(200, 150)
 spy.move(300, 300)
-with _atp.AutoTrackProgress(None, anchor=spy) as _pg:
+spy2 = _QW()
+spy2.resize(200, 150)
+spy2.move(spy.geometry().right() + 1, 300)
+spy2.show()
+app.processEvents()
+with _atp.AutoTrackProgress(None, anchor=[spy, spy2]) as _pg:
     sb = _pg._stop_btn
     sb_shown = (sb is not None and sb.isVisible()
-             and sb.text() == t("■ Auto-Track 停止")
-             and "#d62828" in sb.styleSheet())
+                and sb.text() == t("■ Auto-Track 停止")
+                and "#d62828" in sb.styleSheet()
+                and "font-size:14px" in sb.styleSheet())
     top = spy.mapToGlobal(spy.rect().topLeft())
-    at_top = sb is not None and abs(sb.y() - (top.y() + 14)) <= 2
+    right = spy2.mapToGlobal(spy2.rect().topRight())
+    mid = (top.x() + right.x()) / 2.0
+    at_top = (sb is not None and abs(sb.y() - (top.y() + 10)) <= 2
+              and abs(sb.x() + sb.width() / 2.0 - mid) <= 2
+              and sb.height() < 40)
     from PyQt6.QtTest import QTest  # noqa: E402
     QTest.mouseClick(sb, _Qt.MouseButton.LeftButton)
     c_btn = _pg.cancelled()
     heard = (not sb.isEnabled()) and sb.text() == t("停止中…")
-check("Auto-Track: a big red stop button is shown over the images",
-      sb_shown and at_top, (sb_shown, at_top))
+check("Auto-Track: the stop button sits between the images, below the top",
+      sb_shown and at_top, (sb_shown, at_top, sb.geometry() if sb else None))
 check("… clicking it stops (and it says 停止中…)", c_btn and heard)
 check("… it is gone afterwards", _pg._stop_btn is None)
 
@@ -483,9 +496,12 @@ tube(v, [30, 30, 42.5], [30, 30, 75], 1.5)
 rn_ = extend_vessel(noise(v, 5), D3, ctrl)
 tpn = rn_.trunk.path if rn_.trunk is not None else np.zeros((2, 3))
 spn = np.linalg.norm(np.diff(tpn, axis=0), axis=1)
+# (a faint ROUND narrowing is now usually taken as the vessel itself —
+# "faint round lumen", user 2026-11-25 — else it is bridged)
 check("a short narrowing is bridged, steps still 3 mm",
       tpn[-1][2] > 70 and spn.max() < 3.4
-      and any(e.get("event") == "bridged a narrowing" for e in rn_.log),
+      and any(e.get("event") in ("bridged a narrowing", "faint round lumen")
+              for e in rn_.log),
       (tpn[-1].round(1), round(float(spn.max()), 2)))
 # why it stopped: the last 3 mm section's regions and why each was not
 # taken (values) — in the log and in the result text
@@ -493,7 +509,10 @@ from multi_dicomviewer.core.cpr_autoextend import stop_detail  # noqa: E402
 v = new()
 tube(v, [30, 30, 5], [30, 30, 40], 1.5)
 tube(v, [30, 30, 40], [30, 30, 75], 1.5, hu=240.0)
-rf_ = extend_vessel(noise(v, 6), D3, ctrl)
+# (the faint-but-round search would follow it: off, to test the report)
+rf_ = extend_vessel(noise(v, 6), D3, ctrl,
+                    prm=CAE.ExtendParams(ask_at_fork=False,
+                                         round_rescue=False))
 dt_ = stop_detail(rf_.log)
 txt_ = CoronaryTreeWindow.auto_extend_text(
     "x", {"trunk_mm": 10.0, "branches": [], "stop": rf_.stop, "detail": dt_})

@@ -4133,7 +4133,10 @@ class MainWindow(QMainWindow):
         from multi_dicomviewer.ui.autotrack_progress import (
             AutoTrackProgress, show_result)
         try:
-            with AutoTrackProgress(self, anchor=viewer) as pg:
+            panes = getattr(viewer, "pane", None) or {}
+            anchor = ([panes[k].canvas for k in ("A", "B") if k in panes]
+                      or viewer)
+            with AutoTrackProgress(self, anchor=anchor) as pg:
                 out = w.auto_extend(vid, getattr(viewer, "_vol", None),
                                     getattr(viewer, "_dims", None),
                                     folder=self._viewer_next_dir(viewer),

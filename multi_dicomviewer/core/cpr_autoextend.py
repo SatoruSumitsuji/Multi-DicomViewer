@@ -18,6 +18,9 @@ Predict → search → correct (user 2026-11-18, rebuilt):
    - its size and HU are plausible for this vessel.
    A large region touching the search edge near Q = a chamber / the aorta
    → stop.
+   Nothing above the threshold → the section is searched again from a
+   lower one, and a FAINT region that is clearly round (nearly a circle,
+   brighter than just around it) is still taken (user 2026-11-25).
 3. Choose (A案): one region → it; several → the clearly WIDER (×1.25),
    else the clearly STRAIGHTER; else the line stops there and every region
    becomes its own branch. The others become side branches.
@@ -89,6 +92,17 @@ class ExtendParams:
     # center_hi_frac·(lumen − bg)) is left out.
     center_frac: float = 0.3
     center_hi_frac: float = 0.8
+    # A FAINT but ROUND lumen (user 2026-11-25): when nothing passes the
+    # normal threshold, the section is searched again from bg + round_frac
+    # of the contrast, and a region counts as the vessel if it is nearly a
+    # circle (area ≤ round_max_ratio × its inscribed circle), clearly
+    # brighter than the ring just around it (≥ round_min_local_hu), near the
+    # course (≤ round_max_ang), of a plausible size and connected.
+    round_rescue: bool = True
+    round_frac: float = 0.25
+    round_max_ratio: float = 1.6
+    round_min_local_hu: float = 50.0
+    round_max_ang: float = 45.0
     hu_frac: float = 0.6           # region mean HU ≥ bg + f·(lumen − bg)
     bridge_frac: float = 0.25      # bridged gap's weakest ≥ bg + f·contrast
     min_contrast_hu: float = 120.0  # lumen − background must exceed this
@@ -294,6 +308,16 @@ def _wide_centre(img, A, B, rr, R, ij, e, lo, cap, hi):
     return ca, cb
 
 
+def _ring_hu(V, c, d, rad, n=24):
+    """Median HU on the circle of radius *rad* round *c* in the section
+    ⟂ *d* (what is just outside a lumen of that size)."""
+    u, v = _frame(d)
+    a = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    pts = (np.asarray(c, float)[None] + rad * (np.cos(a)[:, None] * u
+                                              + np.sin(a)[:, None] * v))
+    return float(np.median(V.sample(pts)))
+
+
 def _smooth_min(val, k=3):
     """Weakest value of a 1-D profile after a k-sample running mean (one
     noisy voxel does not break a lumen; a fat gap ≥ 0.75 mm still does)."""
@@ -487,6 +511,39 @@ class _Tracer:
             return a[0], a[1:], False
         return None, cands, True
 
+    def _round_cands(self, P, d, lumen, r, own):
+        """A faint lumen that is clearly ROUND (see ExtendParams.round_*):
+        the section step_mm ahead searched from the lower threshold."""
+        prm = self.p
+        Q = P + prm.step_mm * d
+        lo = self.bg + prm.round_frac * (lumen - self.bg)
+        regs = _regions(self.V, Q, d, lo, prm.search_mm, prm.grid_mm)
+        loose = self.bg + 0.5 * prm.round_frac * (lumen - self.bg)
+        out = []
+        for g in sorted(regs, key=lambda x: np.linalg.norm(x["c"] - Q)):
+            if g["big"]:
+                continue
+            c = g["c"]
+            w = _unit(c - P)
+            ang = _angle(w, d)
+            rr = float(g["r"])
+            if ang > prm.round_max_ang:
+                continue
+            if not (prm.min_radius_mm <= rr <= max(1.5 * r, 1.2)):
+                continue
+            if g["area"] > prm.round_max_ratio * np.pi * rr * rr:
+                continue                         # not round (a band, a blob)
+            if self._traced(c, own):
+                continue
+            if g["hu"] - _ring_hu(self.V, c, d, rr + 1.0) \
+                    < prm.round_min_local_hu:
+                continue                         # not brighter than around
+            if _seg_min(self.V, P, c) <= loose:
+                continue                         # a fat gap on the way
+            out.append({"c": c, "w": w, "r": rr, "hu": g["hu"], "ang": ang,
+                        "s": prm.step_mm, "how": "round"})
+        return out
+
     def _conn(self, lumen) -> float:
         return self.bg + self.p.conn_frac * (lumen - self.bg)
 
@@ -622,6 +679,15 @@ class _Tracer:
                 if cands:
                     rec["event"] = "sharp bend (rays)"
                     rec["cands"] = [{"c": _r3(c["c"]), "r": round(c["r"], 2),
+                                     "ang": round(c["ang"], 1),
+                                     "how": c["how"]} for c in cands]
+            if not cands and not chamber and prm.round_rescue:
+                # faint but round: still the vessel
+                cands = self._round_cands(P, d, lumen, r, own)
+                if cands:
+                    rec["event"] = "faint round lumen"
+                    rec["cands"] = [{"c": _r3(c["c"]), "r": round(c["r"], 2),
+                                     "hu": round(c["hu"], 1),
                                      "ang": round(c["ang"], 1),
                                      "how": c["how"]} for c in cands]
             if not cands:
@@ -856,7 +922,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
         return ExtendResult(None, [], "contrast", log)
     T = _Tracer(V, prm, lumen, bg, cancel, progress, log, on_step)
     # guided = the last point was just set by the user (a fork choice /
-    # 「ここを中心に Auto-Track」): its first mm follow that lumen only
+    # 「Auto-Track 再開」): its first mm follow that lumen only
     T.guided = bool(guided)
     # the given line counts as traced (nothing runs back into it), except
     # its last 3 mm the trace starts from

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Right-click on the distal edit point's short-axis (user 2026-11-19): the
-yellow edit-point marker jumps to the clicked spot while the menu is open,
-so it is clear where 「ここを中心に Auto-Track」 starts. Cancel / another
-item puts it back; Auto-Track starts from that spot.
+"""Right-click on the distal edit point's short-axis (user 2026-11-25):
+the menu offers 「Auto-Track 再開」, which resumes Auto-Track from the point
+AS IT IS — the right-click no longer moves it (its position is adjusted
+with a left-click beforehand). The marker stays put while the menu is open.
 
 Real VTK CTViewer on synthetic data (made-up patient); QMenu.exec patched.
 
@@ -89,9 +89,6 @@ v._cpr_autotrack_center_ok = lambda: True        # (Coronary Tree work)
 orig = [float(q) for q in v._cpr_ctrl_pts3d()[-1]]
 cw, ch = v.pane["A"].canvas.width(), v.pane["A"].canvas.height()
 csx, csy = cw / 2 + 25, ch / 2 - 15              # off the current point
-o, u, vv, _n = v._cpr_frame()
-du, dv = v._disp_to_world("A", csx, csy)
-P = o + du * u + dv * vv
 seen = {}
 
 
@@ -103,13 +100,13 @@ def menu_cancel(self, *a, **k):
 
 QMenu.exec = menu_cancel
 v._cpr_context_menu(csx, csy)
-check("menu offers 「ここを中心に Auto-Track」",
-      t("ここを中心に Auto-Track") in seen.get("texts", []), seen.get("texts"))
-check("while the menu is open the yellow marker is at the clicked spot",
-      np.allclose(seen.get("during"), P, atol=1e-6)
-      and not np.allclose(orig, P, atol=0.5), (seen.get("during"), list(P)))
-check("menu cancelled → the marker is back where it was",
-      np.allclose([float(q) for q in v._cpr_ctrl_pts3d()[-1]], orig))
+check("menu offers 「Auto-Track 再開」 (no 「ここを中心に」)",
+      t("Auto-Track 再開") in seen.get("texts", [])
+      and not any("ここを中心" in x for x in seen.get("texts", [])),
+      seen.get("texts"))
+check("the right-click does not move the marker",
+      np.allclose(seen.get("during"), orig)
+      and np.allclose([float(q) for q in v._cpr_ctrl_pts3d()[-1]], orig))
 
 called = {}
 v._cpr_autotrack = lambda which, mi_, guided=False: called.update(
@@ -117,17 +114,18 @@ v._cpr_autotrack = lambda which, mi_, guided=False: called.update(
     end=[float(q) for q in v._cpr_ctrl_pts3d()[-1]]) or None
 
 
-def menu_pick_at(self, *a, **k):
+def menu_pick(self, *a, **k):
     return next(x for x in self.actions()
-                if x.text() == t("ここを中心に Auto-Track"))
+                if x.text() == t("Auto-Track 再開"))
 
 
-QMenu.exec = menu_pick_at
+QMenu.exec = menu_pick
 v._cpr_context_menu(csx, csy)
-check("Auto-Track chosen → it starts (guided) from the clicked spot",
-      called.get("guided") is True
-      and np.allclose(called.get("end"), P, atol=1e-6), called)
+check("「Auto-Track 再開」 resumes (guided) from the point as it is",
+      called.get("guided") is True and called.get("mi") == mi
+      and np.allclose(called.get("end"), orig), called)
 
 print("ALL PASS" if not fails else f"{len(fails)} FAILED")
+sys.stdout.flush()
 app.processEvents()
 os._exit(1 if fails else 0)

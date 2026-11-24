@@ -1391,6 +1391,28 @@ class CPRMixin:
                         (float((b - o) @ u), float((b - o) @ vv))])
         return out
 
+    #: Auto-Track search range on the stop section (light orange)
+    _CPR_SEARCH_RGB = (255, 190, 120)
+
+    def _cpr_search_ring_2d(self):
+        """The Auto-Track search range on the short axis (user 2026-11-25):
+        ((du, dv), radius mm) of the disc searched for the lumen 3 mm ahead
+        — shown while the stop section is on the left pane (the result
+        dialog, then 「中心を指定して続ける」), so a lumen just outside it is
+        seen at once. None when the section shown is not that one."""
+        sr = getattr(self, "_cpr_search_ring", None)
+        if not sr or getattr(self, "_cpr", None) is None:
+            return None
+        try:
+            o, u, vv, _n = (np.asarray(x, float) for x in self._cpr_frame())
+            q = np.asarray(sr["q"], float)
+        except Exception:                                # noqa: BLE001
+            return None
+        if float(np.linalg.norm(q - o)) > 0.3:    # another section on screen
+            return None
+        d3 = q - o
+        return (float(d3 @ u), float(d3 @ vv)), float(sr["r"])
+
     #: fork candidate numbers (Auto-Track stopped at a fork)
     _CPR_FORK_RGB = (255, 140, 0)
 
@@ -1423,6 +1445,25 @@ class CPRMixin:
         except Exception:                                # noqa: BLE001
             return []
         return out
+
+    @staticmethod
+    def _cpr_spread_px(scr, gap: float = 14.0) -> list:
+        """Sideways pixel offsets for labels at screen points *scr* that
+        would overlap (candidates one behind the other along the right
+        pane's view): each overlapping group is spread *gap* px apart."""
+        n = len(scr)
+        off = [0.0] * n
+        done = [False] * n
+        for i in range(n):
+            if done[i]:
+                continue
+            grp = [j for j in range(n) if not done[j]
+                   and abs(scr[j][0] - scr[i][0]) < gap
+                   and abs(scr[j][1] - scr[i][1]) < gap]
+            for k, j in enumerate(grp):
+                off[j] = (k - (len(grp) - 1) / 2.0) * gap
+                done[j] = True
+        return off
 
     def _cpr_fork_marks_set(self, fork) -> None:
         """Show (fork list) / hide (None) the candidate numbers on both panes."""
@@ -1726,6 +1767,14 @@ class CPRMixin:
             return
         i = int(min(max(int(c["idx"]), 0), len(pts) - 1))
         P = np.asarray(pts[i], float)
+        k = self._cpr_at_ctrl()               # on an edit point: exactly it
+        p3 = self._cpr_ctrl_pts3d() if k is not None else None
+        if p3 and 0 <= k < len(p3):
+            P = np.asarray(p3[k], float)
+        # the crossing (the yellow crosshair centre) on the point too, so the
+        # selected edit point is the centre of the right pane as well (user
+        # 2026-11-25)
+        self._center = P.copy()
         if hasattr(self, "_cpr_recenter_map_pane"):
             self._cpr_recenter_map_pane(mapkey, P)
 
@@ -2424,6 +2473,7 @@ class CPRMixin:
             AutoTrackProgress, show_result)
         if getattr(self, "_cpr_fork_marks", None):
             return None                  # a fork choice is still open
+        self._cpr_search_ring = None
         m = self._measures[which][mi]
         p3 = np.asarray(m.get("pts3d") or [], float)
         if len(p3) < 2:
@@ -2479,7 +2529,10 @@ class CPRMixin:
             return not (pg is not None and pg.cancelled())
 
         try:
-            with AutoTrackProgress(self.window(), anchor=self) as pg:
+            panes = getattr(self, "pane", None) or {}
+            anchor = ([getattr(panes[k], "canvas", None) for k in ("A", "B")
+                       if k in panes] or self)
+            with AutoTrackProgress(self.window(), anchor=anchor) as pg:
                 pg_ref["pg"] = pg
                 res = extend_vessel(self._vol, self._dims, p3,
                                     cancel=pg.cancelled, progress=pg.update,
@@ -2531,14 +2584,23 @@ class CPRMixin:
         # stopped (3 mm beyond the last point) — a temporary end point, not
         # saved / not in undo, removed when the dialog is closed
         before_probe = self._meas_pane_snap(which)
-        keep = self._cpr_autotrack_probe(which, mi, m, out, res.stop)
         fork = list(getattr(res, "fork", []) or [])
+        # A fork: the stop section (with the numbered candidates) is shown
+        # while the choice waits. Any other stop (user 2026-11-25): both
+        # panes stay centred on the FINAL traced point; the stop section
+        # (with the search range) only comes with 「中心を指定して続ける」.
+        keep = (self._cpr_autotrack_probe(which, mi, m, out, res.stop)
+                if fork else None)
+        can_probe = keep is not None or (
+            not fork and self._cpr_probe_ok(which, mi, m, out, res.stop))
+        if keep is None and can_probe:
+            self._cpr_center_on_last(which, mi)
         extras = []
         if fork and keep is not None:
             out["fork"] = fork
             out["fork_view"] = self._cpr_autotrack_fork_view(fork)
             extras = [t("候補 {k} へ進む", k=k + 1) for k in range(len(fork))]
-        if keep is not None:
+        if can_probe:
             extras.append(t("中心を指定して続ける"))
         out["extras"] = extras
         if fork and keep is not None:
@@ -2567,8 +2629,12 @@ class CPRMixin:
             self._meas_record(which, before_probe)
             out["next"] = self._cpr_autotrack_from_section(fork[ch]["c"])
             return out
-        out["chosen_extra"] = keep is not None and ch == len(extras) - 1 \
+        out["chosen_extra"] = can_probe and ch == len(extras) - 1 \
             and ch >= 0
+        if out.get("chosen_extra") and keep is None:
+            # the stop section comes now: its point is the new distal edit
+            # point, the left pane shows it with the search range
+            keep = self._cpr_autotrack_probe(which, mi, m, out, res.stop)
         if keep is not None:
             if out.get("chosen_extra"):
                 # 中心を指定して続ける: the stop-section point stays as the line's
@@ -2577,7 +2643,7 @@ class CPRMixin:
                 # Auto-Track goes on
                 self._meas_record(which, before_probe)
                 self._cpr_autotrack_hint(t(
-                    "左ペインで内腔の中心を右クリック →「ここを中心に Auto-Track」"))
+                    "左ペインで内腔の中心を左クリックで調整 → 右クリック「Auto-Track 再開」"))
             else:
                 self._cpr_autotrack_probe_end(which, mi, m, keep)
         return out
@@ -2615,7 +2681,7 @@ class CPRMixin:
 
     def _cpr_autotrack_center_ok(self) -> bool:
         """The short-axis sits on the line's DISTAL edit point and Auto-Track
-        is available → 「ここを中心に Auto-Track」 in the left pane menu."""
+        is available → 「Auto-Track 再開」 in the left pane menu."""
         c = self._cpr
         if c is None or getattr(self, "_vol", None) is None:
             return False
@@ -2627,31 +2693,19 @@ class CPRMixin:
         k = self._cpr_at_ctrl()
         return k is not None and k == len(m["pts3d"]) - 1
 
-    def _cpr_center_preview(self, P):
-        """Right-click on the distal edit point's section (user 2026-11-19):
-        the yellow edit-point marker jumps to the clicked spot *P* at once,
-        so it is clear where 「ここを中心に Auto-Track」 will start. Returns a
-        restore callable (the menu decides what really happens: Auto-Track
-        moves it there for good with its own undo step; anything else puts
-        it back), or None."""
-        p3 = self._cpr_ctrl_pts3d()
-        if not p3:
+    def _cpr_autotrack_resume(self) -> dict | None:
+        """Right-click ▸ 「Auto-Track 再開」: Auto-Track goes on from the
+        line's distal edit point where it is now (set beforehand with a
+        left-click) — the right-click no longer moves it (user 2026-11-25)."""
+        c = self._cpr
+        if c is None or self._cpr_src_measure() is None:
             return None
-        keep = p3[-1]
-        p3[-1] = np.asarray(P, float)
-        self._cpr_ctrl_markers_redraw()
-
-        def _restore():
-            q = self._cpr_ctrl_pts3d()
-            if q is p3 and q:
-                q[-1] = keep
-                self._cpr_ctrl_markers_redraw()
-        return _restore
+        return self._cpr_autotrack(c.get("src"), c.get("src_mi"), guided=True)
 
     def _cpr_autotrack_from_section(self, P) -> dict | None:
-        """「ここを中心に Auto-Track」: move the distal edit point to *P* (the
-        clicked spot on its short-axis section — one undo step) and run
-        Auto-Track on from there."""
+        """「候補 k へ進む」 at a fork: move the distal edit point to *P* (that
+        candidate's lumen centre on the stop section — one undo step) and
+        run Auto-Track on from there."""
         c = self._cpr
         m = self._cpr_src_measure()
         if c is None or m is None:
@@ -2671,6 +2725,34 @@ class CPRMixin:
         self._refresh()
         return self._cpr_autotrack(src, mi, guided=True)
 
+    def _cpr_probe_ok(self, which, mi, m, out, stop) -> bool:
+        """The stop section can be shown (see _cpr_autotrack_probe)."""
+        q = (out.get("detail") or {}).get("q")
+        return bool(q is not None and stop != "cancel"
+                    and self._cpr is not None
+                    and self._cpr_is_src(which, mi)
+                    and len(m.get("pts3d") or []) >= 2)
+
+    def _cpr_center_on_last(self, which, mi) -> None:
+        """Both panes centred on the line's final (distal) edit point: the
+        short axis on it, the long-axis pane and the crossing there."""
+        try:
+            if self._cpr is None or not self._cpr_is_src(which, mi):
+                return
+            idxs = self._cpr_ctrl_indices()
+            if idxs:
+                self._cpr["idx"] = int(idxs[-1])
+            p3 = self._cpr_ctrl_pts3d()
+            if p3:
+                self._center = np.asarray(p3[-1], float).copy()
+            self._cpr_sync_bar()
+            self._cpr_center_map_on_current()
+            self._redraw_meas(which)
+            self._refresh()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
     def _cpr_autotrack_probe(self, which, mi, m, out, stop):
         """Show the stop section in the left pane: the line gets a TEMPORARY
         end point there and its short-axis lands on it. Returns the points
@@ -2684,6 +2766,10 @@ class CPRMixin:
             if len(keep) < 2:
                 return None
             self._cpr_set_ctrl(m, which, keep + [list(map(float, q))])
+            from multi_dicomviewer.core.cpr_autoextend import ExtendParams
+            self._cpr_search_ring = {"q": list(map(float, q)),
+                                     "r": float(ExtendParams().search_mm)}
+            self._center = np.asarray(q, float).copy()   # the new centre
             self._cpr_rebuild()
             idxs = self._cpr_ctrl_indices()
             if idxs:
@@ -2700,8 +2786,11 @@ class CPRMixin:
             return None
 
     def _cpr_autotrack_probe_end(self, which, mi, m, keep) -> None:
+        self._cpr_search_ring = None
         try:
             self._cpr_set_ctrl(m, which, keep)
+            if keep:
+                self._center = np.asarray(keep[-1], float).copy()
             if self._cpr is not None and self._cpr_is_src(which, mi):
                 self._cpr_rebuild()
                 idxs = self._cpr_ctrl_indices()

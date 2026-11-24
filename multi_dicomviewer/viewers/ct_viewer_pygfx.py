@@ -1275,15 +1275,24 @@ class _Overlay(QWidget):
             return
         col = QColor(*v._CPR_FORK_RGB)
         f = QFont()
-        f.setPointSize(17)
+        f.setPointSize(17 if key == "A" else 11)
         f.setBold(True)
         p.setFont(f)
         fm = QFontMetricsF(f)
-        for text, (x, y) in pts:
-            if key == "A":
-                sx, sy = v._cpr_offset_to_screen(x, y)
-            else:
+        spread = ([0.0] * len(pts) if key == "A" else v._cpr_spread_px(
+            [v._world_to_screen(key, x, y) for _t, (x, y) in pts]))
+        for (text, (x, y)), dx in zip(pts, spread):
+            if key != "A":
+                # long axis: a small number ON the candidate's centre (the
+                # round lumen 3 mm ahead), no ring / frame
                 sx, sy = v._world_to_screen(key, x, y)
+                sx += dx
+                tw, th = fm.horizontalAdvance(text) + 4, fm.height()
+                _draw_outlined_text(
+                    p, QRectF(sx - tw / 2, sy - th / 2, tw, th),
+                    int(Qt.AlignmentFlag.AlignCenter), text, col, width=1.0)
+                continue
+            sx, sy = v._cpr_offset_to_screen(x, y)
             p.setPen(QPen(col, 2.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(sx, sy), 9.0, 9.0)
@@ -1311,10 +1320,18 @@ class _Overlay(QWidget):
         # in-plane. On an interpolated section → a HOLLOW yellow ring at the
         # spline centre (not editable; Alt+F/A steps to an edit point, or
         # right-click ▸ Add Point).
+        srch = v._cpr_search_ring_2d()            # Auto-Track search range
+        if srch:
+            (sdu, sdv), sr = srch
+            scx, scy = v._cpr_offset_to_screen(sdu, sdv)
+            ex_, _ey = v._cpr_offset_to_screen(sdu + sr, sdv)
+            p.setPen(QPen(QColor(*v._CPR_SEARCH_RGB, 150), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(scx, scy), abs(ex_ - scx), abs(ex_ - scx))
         # The right (long-axis) pane's plane as a dashed line: a point set /
         # moved there moves along this line in the section.
         for (a, b) in v._cpr_map_plane_section_2d():
-            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, 190), 1.4)
+            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, 128), 1.4)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
             ax_, ay_ = v._cpr_offset_to_screen(*a)
@@ -20122,6 +20139,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         DELETE the traced centreline polyline, and hide the row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_search_ring = None                  # no Auto-Track ring left
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
@@ -20730,11 +20748,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
-        # On the DISTAL edit point (CoronaryTree work): move it to the
-        # clicked lumen centre and Auto-Track on from there.
+        # On the DISTAL edit point (CoronaryTree work): Auto-Track goes on
+        # from that point AS IT IS (user 2026-11-25: right-click = resume
+        # only; its position is adjusted with a left-click beforehand).
         a_at = None
         if self._cpr_autotrack_center_ok():
-            a_at = menu.addAction(t("ここを中心に Auto-Track"))
+            a_at = menu.addAction(t("Auto-Track 再開"))
             menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an
@@ -20747,18 +20766,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a_del = menu.addAction(t("Delete Point") if on_pt
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)
-        restore = None
-        if a_at is not None:              # yellow marker → the clicked spot
-            o, u, vv, _n = self._cpr_frame()
-            du, dv = self._cpr_screen_to_offset(sx, sy)
-            restore = self._cpr_center_preview(o + du * u + dv * vv)
         act = menu.exec(QCursor.pos())
-        if restore is not None:
-            restore()                     # the chosen action decides
         if a_at is not None and act is a_at:
-            o, u, vv, _n = self._cpr_frame()
-            du, dv = self._cpr_screen_to_offset(sx, sy)
-            self._cpr_autotrack_from_section(o + du * u + dv * vv)
+            self._cpr_autotrack_resume()  # from the point as it is now
         elif act is a_add:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._cpr_screen_to_offset(sx, sy)   # section camera, not MPR

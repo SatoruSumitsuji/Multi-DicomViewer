@@ -103,6 +103,20 @@ for key in ("A", "B"):
           and all(np.allclose(g[1], e, atol=1e-6) for g, e in zip(got, ex)),
           (got, ex))
 
+acts = {k: list(getattr(v.pane[k], "fork_lbls", []) or []) for k in "AB"}
+check("right pane: small numbers ON the candidates, no frame / box",
+      all(not a.GetTextProperty().GetFrame()
+          and a.GetTextProperty().GetFontSize() <= 16
+          and a.GetDisplayOffset()[1] == 0 for a in acts["B"]),
+      [(a.GetTextProperty().GetFontSize(), a.GetTextProperty().GetFrame())
+       for a in acts["B"]])
+scr = [np.add(v._world_to_qt("B", *a.GetPosition()[:2]),
+              (a.GetDisplayOffset()[0], 0)) for a in acts["B"]]
+check("right pane: numbers one behind the other are spread apart",
+      len(scr) == 2 and float(np.hypot(*(scr[0] - scr[1]))) >= 12.0, scr)
+check("short axis: framed numbers beside the rings (as before)",
+      all(a.GetTextProperty().GetFrame() for a in acts["A"]))
+
 # rotate the right pane 40° about the vessel: the numbers follow the branch
 fu, fv, fn = (np.asarray(a, float) for a in v._frame["B"])
 ax, th = np.array([1.0, 0, 0]), math.radians(40)
@@ -167,6 +181,7 @@ if _Overlay is not None:
 
     class _V:
         _CPR_FORK_RGB = (255, 140, 0)
+        _cpr_spread_px = staticmethod(lambda scr: [0.0] * len(scr))
 
         def _cpr_fork_label_pts(self, key):
             return [("1", (0.0, 0.0)), ("2", (10.0, 0.0))]
