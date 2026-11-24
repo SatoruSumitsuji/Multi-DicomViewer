@@ -2440,6 +2440,21 @@ class CPRMixin:
             return False
         return bool(shell.coronary_auto_extend(self, vid))
 
+    def _coro_batch_extend(self):
+        """「一括描出」 (Draw ▸ 一括描出 ▸ Auto, user 2026-11-25): every
+        unconnected branch line (a few points set at a branch's distal end)
+        is traced PROXIMALLY by Auto-Track until it meets the tree, one after
+        another; FinTrace ◯ = reached its branch point, × = stopped."""
+        if getattr(self, "_coronary_mpr_pending", False):
+            self._cpr_autotrack_hint(t("描画中です。右クリックで線を確定してから"
+                                       "「一括描出」を押してください。"))
+            return None
+        shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
+                 else None)
+        if shell is None or not hasattr(shell, "coronary_batch_extend"):
+            return None
+        return shell.coronary_batch_extend(self)
+
     def _cpr_autotrack_ok(self, which, mi, vi) -> bool:
         """Auto-Track on the distal edit point of a CPR line."""
         if getattr(self, "_mode", "3D") != "3D" or not self._coro_work_on():

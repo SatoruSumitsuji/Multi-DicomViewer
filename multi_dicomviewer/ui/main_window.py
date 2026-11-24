@@ -4162,6 +4162,67 @@ class MainWindow(QMainWindow):
             self.coronary_auto_extend_report(viewer, out, name=nm, w=w)
         return out
 
+    def coronary_batch_extend(self, viewer):
+        """「一括描出」 on *viewer* (user 2026-11-25): every unconnected branch
+        line of its CT's tree is traced proximally to the tree (see
+        CoronaryTreeWindow.batch_extend); the result in one dialog."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "batch_extend"):
+            return None
+        from multi_dicomviewer.ui.autotrack_progress import (
+            AutoTrackProgress, show_result)
+        try:
+            pane = self._pane_of_viewer(viewer)
+            uid = (pane.shown_series_uid() or "") if pane is not None else ""
+            u = w.uid_for_series(uid) if (uid and hasattr(
+                w, "uid_for_series")) else ""
+            if u:
+                w._use_uid(u)
+        except Exception:                                # noqa: BLE001
+            pass
+        n = len(w.batch_targets_to_tree())
+        if not n:
+            show_result(self, t("一括描出：未接続の枝（末梢に置いた CPR 線）が"
+                                "ありません。"), ok=False)
+            return None
+        if not w._tree.roots():
+            show_result(self, t("一括描出：先に LM / LAD / LCX / RCA の CPR 線を"
+                                "描いて役割を設定してください。"), ok=False)
+            return None
+        try:
+            panes = getattr(viewer, "pane", None) or {}
+            anchor = ([panes[k].canvas for k in ("A", "B") if k in panes]
+                      or viewer)
+            with AutoTrackProgress(self, name=t("一括描出"),
+                                   anchor=anchor) as pg:
+                out = w.batch_extend(getattr(viewer, "_vol", None),
+                                     getattr(viewer, "_dims", None),
+                                     cancel=pg.cancelled, progress=pg.update)
+        except Exception as exc:                         # noqa: BLE001
+            traceback.print_exc()
+            show_result(self, t("Auto-Track でエラーが発生しました: {e}",
+                                e=f"{type(exc).__name__}: {exc}"), ok=False)
+            return None
+        if hasattr(viewer, "_cpr_retire_stale_copies"):
+            for path in (out.get("changed") or {}).values():
+                if path:
+                    try:
+                        viewer._cpr_retire_stale_copies(path)
+                    except Exception:                    # noqa: BLE001
+                        pass
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        from multi_dicomviewer.ui.coronary_tree_window import (
+            CoronaryTreeWindow)
+        txt = CoronaryTreeWindow.batch_extend_text(out)
+        sb = self.statusBar() if hasattr(self, "statusBar") else None
+        if sb is not None:
+            sb.showMessage(txt.split("\n")[0], 15000)
+        done = out.get("done") or []
+        show_result(self, txt, ok=bool(done) and all(
+            d["reached"] for d in done) and not out.get("cancelled"))
+        return out
+
     def coronary_add_auto_branches(self, viewer, path: str, segments) -> list:
         """The CPR line saved to *path* got branches from 自動追跡 → add each
         as its own tree line hung on it."""

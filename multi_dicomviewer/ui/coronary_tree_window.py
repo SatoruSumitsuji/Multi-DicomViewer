@@ -110,14 +110,16 @@ _CONNECT_TOL_MM = 5.0
 #: Every column but Vessel can be folded to a narrow "×" (header ×). The
 #: Vessel column is the line's name (名前を変更 renames the serial 01, 02 …);
 #: ファイル名更新 names the files <name> + the tree's ONE FixName (row 2).
-_C_NAME, _C_ROLE, _C_EXCL, _C_BR, _C_AUTO, _C_FIN, _C_MYO = range(7)
-_N_COLS = 7
-_COL_DEFAULT_W = {_C_ROLE: 76, _C_EXCL: 64, _C_BR: 76, _C_AUTO: 90,
+# (the AutoTrace column is gone — user 2026-11-25: FinTrace ◯ / × now
+# says whether 一括描出 reached the branch point)
+_C_NAME, _C_ROLE, _C_EXCL, _C_BR, _C_FIN, _C_MYO = range(6)
+_N_COLS = 6
+_COL_DEFAULT_W = {_C_ROLE: 76, _C_EXCL: 64, _C_BR: 76,
                   _C_FIN: 84, _C_MYO: 120}
 #: AutoTrace / FinTrace cell marks
 _MARK_YES, _MARK_NO = "◯", "×"
 #: ui_state key of the folded columns (v2: FinTrace inserted → indices moved)
-_FOLD_KEY = "corotree_folded_cols4"   # v4: Excl. inserted after Role
+_FOLD_KEY = "corotree_folded_cols5"   # v5: AutoTrace removed
 _COL_FOLDED_W = 20
 _X_W = 14                                     # the "×" hit area at a header's right
 
@@ -641,9 +643,9 @@ class CoronaryTreeWindow(SnapDock):
 
         self._tree_w = QTreeWidget()
         self._tree_w.setColumnCount(_N_COLS)
-        # Vessel, Role, Excl., Branches, AutoTrace, FinTrace, Myocardium.
+        # Vessel, Role, Excl., Branches, FinTrace, Myocardium.
         self._col_labels = [t("血管"), t("役割"), t("除外・Excl."), t("分岐"),
-                            t("AutoTrace"), t("FinTrace"), t("心筋量")]
+                            t("FinTrace"), t("心筋量")]
         hdr = _XHeader(self._tree_w)
         self._tree_w.setHeader(hdr)
         self._tree_w.setHeaderLabels(self._col_labels)
@@ -1580,9 +1582,6 @@ class CoronaryTreeWindow(SnapDock):
         self._tree.fix_name = (text or "").strip()
         self._refresh_rename_btn()
 
-    def _auto_text(self, v) -> str:
-        return _MARK_YES if getattr(v, "auto_traced", False) else _MARK_NO
-
     def _fin_text(self, v) -> str:
         return _MARK_YES if getattr(v, "fin_traced", False) else _MARK_NO
 
@@ -1593,7 +1592,6 @@ class CoronaryTreeWindow(SnapDock):
         cols[_C_NAME] = self._display_name(v)
         cols[_C_ROLE] = role_txt
         cols[_C_BR] = self._junction_text(vid)
-        cols[_C_AUTO] = self._auto_text(v)
         cols[_C_FIN] = self._fin_text(v)
         cols[_C_MYO] = self._myo_text(vid)
         it = QTreeWidgetItem(cols)
@@ -1603,11 +1601,10 @@ class CoronaryTreeWindow(SnapDock):
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
         it.setForeground(0, QColor(self._root_color(self._root_role(vid))))
-        for c, on in ((_C_AUTO, getattr(v, "auto_traced", False)),
-                      (_C_FIN, getattr(v, "fin_traced", False))):
+        for c, on in ((_C_FIN, getattr(v, "fin_traced", False)),):
             it.setTextAlignment(c, int(Qt.AlignmentFlag.AlignCenter))
             it.setForeground(c, QColor("#1a7f37" if on else "#b00000"))
-        it.setToolTip(_C_FIN, t("FinTrace（トレース完了）：ダブルクリックで ◯/× を切替。複数行は Shift/Ctrl で選んで右クリック"))
+        it.setToolTip(_C_FIN, t("FinTrace：一括描出で分岐部まで到達した線は ◯、途中で止まった線は ×。ダブルクリックで ◯/× を切替。複数行は Shift/Ctrl で選んで右クリック"))
         it.setCheckState(_C_EXCL, Qt.CheckState.Checked
                          if getattr(v, "excluded", False)
                          else Qt.CheckState.Unchecked)
@@ -2973,9 +2970,7 @@ class CoronaryTreeWindow(SnapDock):
             self._revert_manual(sel)
             return
         if chosen in role_acts and vid is not None:
-            self._tree.set_role(vid, role_acts[chosen])
-            self._populate()
-            self.treeChanged.emit()
+            self._apply_role(vid, role_acts[chosen])
         elif chosen is a_rev and vid is not None:
             self._reverse(vid)
         elif chosen is a_ren:
@@ -2986,6 +2981,34 @@ class CoronaryTreeWindow(SnapDock):
             # every selected line (Ctrl / Shift) + its downstream branches —
             # the former 消去 button's job (that button is gone)
             self._delete_selected()
+
+    def _apply_role(self, vid, role) -> None:
+        """役割 ▸ LM / LAD / LCX / RCA / 枝. For a root role, first ask whether
+        the vessel should also take the role's name (user 2026-11-25: the
+        name was nearly always changed to it by hand afterwards). Yes = the
+        same as 名前を変更 to that name (its .cpr.json follows); No = the role
+        only."""
+        v = self._tree.vessels.get(vid)
+        if v is None:
+            return
+        rename = False
+        if role in ROOT_ROLES and self._display_name(v) != role:
+            rename = QMessageBox.question(
+                self, t("役割"),
+                t("血管名称を役割名「{role}」に変更しますか？\n（{name} → {role}）",
+                  role=role, name=self._display_name(v)),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            ) == QMessageBox.StandardButton.Yes
+        self._tree.set_role(vid, role)
+        if rename:
+            v.name = v.detail_name = role
+        self._populate()
+        self.treeChanged.emit()
+        if rename:
+            # the file follows at once (<name> + FixName), as with 名前を変更
+            self._batch_rename(only={vid}, ask=False)
 
     def _reverse(self, vid):
         """Flip a vessel's proximal↔distal direction. A connected branch is also
@@ -3616,6 +3639,107 @@ class CoronaryTreeWindow(SnapDock):
                "detail": stop_detail(res.log)}
         self._hint.setText(self.auto_extend_text(v.name, out))
         return out
+
+    def batch_targets_to_tree(self) -> list:
+        """一括描出's lines: every branch line not connected yet (parent
+        None, role 枝) of the active CT."""
+        return list(self._tree.unconnected())
+
+    def batch_extend(self, vol, dims, cancel=None, progress=None) -> dict:
+        """一括描出 (user 2026-11-25): every unconnected branch line (a few
+        points at a branch's distal end) is traced PROXIMALLY until it meets
+        another line of the tree; then it is connected there (FinTrace ◯).
+        A line that stops on its way stays unconnected (FinTrace ×) and the
+        next one goes on. Each is traced against the tree as it is then (a
+        line traced earlier counts too). Files are rewritten like
+        Auto-Track. {"done": [{vid, name, reached, added_mm, stop,
+        parent}], "cancelled", "changed": {vid: old path}}."""
+        from multi_dicomviewer.core.cpr_autoextend import (save_log,
+                                                           trace_to_tree)
+        out = {"done": [], "cancelled": False, "changed": {}, "log_path": ""}
+        if vol is None or dims is None:
+            return out
+        tree = self._tree
+        b = self._bundle()
+        todo = self.batch_targets_to_tree()
+        logs = []
+        for k, vid in enumerate(todo):
+            if cancel is not None and cancel():
+                out["cancelled"] = True
+                break
+            v = tree.vessels.get(vid)
+            if v is None or v.parent is not None:
+                continue
+            others = [(o, ov.points) for o, ov in tree.vessels.items()
+                      if o != vid and ov.n >= 2]
+            if not others:
+                break
+            seed = np.asarray(v.ctrl if v.ctrl is not None
+                              and len(v.ctrl) >= 2 else v.points, float)
+
+            def prog(_st, line_mm, total_mm, _k=0, _n=0, _i=k, _nm=v.name):
+                if progress is not None:
+                    progress("batch", line_mm, total_mm, _i + 1, len(todo),
+                             _nm)
+
+            tree_ok = [p for o, p in others
+                       if tree.vessels[o].role in ROOT_ROLES
+                       or tree.vessels[o].parent is not None]
+            r = trace_to_tree(vol, dims, seed, [p for _o, p in others],
+                              cancel=cancel, progress=prog,
+                              orient=tree_ok or None)
+            logs.extend(r.log)
+            if r.stop == "cancel" and not r.reached:
+                out["cancelled"] = True
+            changed = (len(r.ctrl) != len(seed)
+                       or not np.allclose(r.ctrl, seed))
+            if changed:
+                path = b["paths"].get(vid, "") or ""
+                out["changed"][vid] = path
+                self._set_vessel_ctrl(tree, vid, r.ctrl)
+                v.ctrl_manual = None
+                old = self._read_cpr(path) if path else None
+                if path and old is not None:
+                    self._write_cpr(path, self._cpr_file_with(old, r.ctrl))
+            parent = None
+            if r.reached and 0 <= r.target < len(others):
+                parent = others[r.target][0]
+                tree.set_parent(vid, parent, int(r.junction))
+            v.fin_traced = bool(parent)
+            out["done"].append({"vid": vid, "name": v.name,
+                                "reached": bool(parent),
+                                "added_mm": float(r.added_mm),
+                                "stop": r.stop, "parent": parent})
+            if out["cancelled"]:
+                break
+        try:
+            out["log_path"] = save_log(logs) if logs else ""
+        except Exception:                                # noqa: BLE001
+            out["log_path"] = ""
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(self.batch_extend_text(out))
+        return out
+
+    @classmethod
+    def batch_extend_text(cls, out) -> str:
+        done = out.get("done") or []
+        ok = [d for d in done if d["reached"]]
+        ng = [d for d in done if not d["reached"]]
+        L = [t("一括描出：{n} 本中 {a} 本が分岐部まで到達（FinTrace ◯）、"
+               "{b} 本は途中で停止（FinTrace ×）。",
+               n=len(done), a=len(ok), b=len(ng))]
+        if out.get("cancelled"):
+            L.append(t("（停止しました。残りの線は未処理です）"))
+        for d in ok:
+            L.append("◯ " + t("「{n}」 {mm:.0f} mm 延長 → 接続",
+                               n=d["name"], mm=d["added_mm"]))
+        for d in ng:
+            L.append("× " + t("「{n}」 {mm:.0f} mm 延長（{s}）",
+                               n=d["name"], mm=d["added_mm"],
+                               s=cls.stop_text(d["stop"])))
+        return "\n".join(L)
 
     @classmethod
     def auto_extend_text(cls, name, out) -> str:

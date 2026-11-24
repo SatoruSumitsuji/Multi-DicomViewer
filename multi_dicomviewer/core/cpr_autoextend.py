@@ -99,6 +99,11 @@ class ExtendParams:
     # brighter than the ring just around it (≥ round_min_local_hu), near the
     # course (≤ round_max_ang), of a plausible size and connected.
     round_rescue: bool = True
+    # 一括描出 (distal → proximal, user 2026-11-25): only the line itself
+    # (no side branches), and at "no clear trunk" the WIDER lumen is taken
+    # instead of stopping (going proximally the wider one is the parent).
+    trunk_only: bool = False
+    fork_take_wider: bool = False
     round_frac: float = 0.25
     round_max_ratio: float = 1.6
     round_min_local_hu: float = 50.0
@@ -719,6 +724,10 @@ class _Tracer:
                     rec["event"] = "fork: user chooses"
                     self.log.append(rec)
                     break
+            if amb and prm.fork_take_wider:
+                g_ = sorted(cands, key=lambda c: -c["r"])
+                main, others, amb = g_[0], g_[1:], False
+                rec["event"] = "fork: took the wider"
             if amb:
                 for c in others:
                     if c["r"] >= prm.branch_min_radius_mm:
@@ -947,7 +956,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     if len(path) >= 2 and np.linalg.norm(path[-1] - path[0]) >= 1.5:
         trunk = Segment(path, _thin(path, prm.ctrl_mm), -1, 0, stop)
     branches = []
-    queue = [(s, -1, 1) for s in seeds]
+    queue = [] if prm.trunk_only else [(s, -1, 1) for s in seeds]
     done_n = 0
     while queue:
         sd, parent, depth = queue.pop(0)
@@ -985,6 +994,107 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
         np.diff(path, axis=0), axis=1).sum()) if trunk is not None else 0.0,
         1), "stop": stop, "branches": len(branches)}})
     return ExtendResult(trunk, branches, stop, log, list(T.fork))
+
+
+@dataclass
+class ToTreeResult:
+    ctrl: np.ndarray                 # the whole line, proximal → distal
+    added_mm: float                  # how much was traced on
+    reached: bool                    # got to another line (a junction)
+    target: int                      # index into *targets* (-1: none)
+    junction: int                    # nearest sample on that target
+    dist_mm: float                   # final end → that target
+    stop: str
+    log: list = field(default_factory=list)
+
+
+def _proximal_first(seed, stack):
+    """*seed* with its end nearer *stack* (the tree) first."""
+    S = np.asarray(seed, float).reshape(-1, 3)
+    if len(stack) == 0 or len(S) < 2:
+        return S
+    d0 = float(np.linalg.norm(stack - S[0], axis=1).min())
+    d1 = float(np.linalg.norm(stack - S[-1], axis=1).min())
+    return S if d0 <= d1 else S[::-1].copy()
+
+
+def trace_to_tree(vol, dims, seed, targets, prm: ExtendParams | None = None,
+                  cancel=None, progress=None, reach_mm: float = 3.0,
+                  near_mm: float = 4.5,
+                  inside_mm: float = 1.6, orient=None) -> ToTreeResult:
+    """一括描出 (user 2026-11-25): a short line set at a branch's distal
+    end (*seed*, 2–3 points, either order) is traced PROXIMALLY until it
+    meets one of *targets* (the other lines of the tree, (N,3) each) — it
+    stops when its centre comes within *reach_mm* of one (a branch point,
+    ~1–2 mm short of it). The end of *seed* nearer the tree (*orient*,
+    default *targets*) is its proximal end. Going proximally the vessel gets wider and brighter, and
+    at a confluence the wider lumen (the parent) is followed. A stop for
+    another reason still counts as reached when the end is within
+    *near_mm* (the last step met the parent's wide lumen)."""
+    base = prm or ExtendParams()
+    prm = ExtendParams(**{**asdict(base), "ask_at_fork": False,
+                          "trunk_only": True, "fork_take_wider": True})
+    tg = [np.asarray(x, float).reshape(-1, 3) for x in targets]
+    owner = (np.concatenate([np.full(len(x), i) for i, x in enumerate(tg)])
+             if tg else np.zeros(0, int))
+    stack = np.vstack(tg) if tg else np.zeros((0, 3))
+    # which end is proximal: the one nearer the tree proper (*orient*: the
+    # connected lines; other loose distal lines would mislead)
+    ori = ([np.asarray(x, float).reshape(-1, 3) for x in orient]
+           if orient is not None else tg)
+    S = _proximal_first(seed, np.vstack(ori) if ori else stack)
+
+    def nearest(p):
+        if len(stack) == 0:
+            return np.inf, -1, -1
+        dd = np.linalg.norm(stack - p, axis=1)
+        k = int(np.argmin(dd))
+        i = int(owner[k])
+        j = int(np.argmin(np.linalg.norm(tg[i] - stack[k], axis=1)))
+        return float(dd[k]), i, j
+
+    hit = {}
+
+    def on_step(_line, depth, path, _d):
+        if depth != 0:
+            return True
+        dist, i, j = nearest(path[-1])
+        if dist <= reach_mm:
+            hit.update(dist=dist, i=i, j=j)
+            return False
+        return True
+
+    dist0, i0, j0 = nearest(S[0])
+    if dist0 <= reach_mm or len(S) < 2:          # already at the tree
+        return ToTreeResult(S, 0.0, dist0 <= reach_mm, i0, j0, dist0,
+                            "reached" if dist0 <= reach_mm else "short", [])
+    res = extend_vessel(vol, dims, S[::-1], prm, cancel=cancel,
+                        progress=progress, on_step=on_step)
+    ctrl = S
+    added = 0.0
+    if res.trunk is not None:
+        tc = np.asarray(res.trunk.ctrl, float)
+        ctrl = np.vstack([tc[::-1][:-1], S])
+        added = float(np.linalg.norm(np.diff(res.trunk.path, axis=0),
+                                     axis=1).sum())
+    # the last step may land IN the parent (its centre): the line ends at
+    # the branch, not inside the other vessel
+    while len(ctrl) > len(S) and nearest(ctrl[0])[0] < inside_mm:
+        ctrl = ctrl[1:]
+    if hit:
+        stop = "reached"
+        dist, i, j = nearest(ctrl[0])
+        reached = True
+    else:
+        stop = res.stop
+        dist, i, j = nearest(ctrl[0])
+        reached = stop != "cancel" and dist <= near_mm
+        if reached:
+            stop = "reached"
+    res.log.append({"to_tree": {"reached": reached, "dist": round(dist, 2),
+                                "added_mm": round(added, 1), "stop": stop}})
+    return ToTreeResult(ctrl, added, reached, i if reached else -1,
+                        j if reached else -1, dist, stop, res.log)
 
 
 def save_log(log, folder=None, keep: int = 30) -> str:

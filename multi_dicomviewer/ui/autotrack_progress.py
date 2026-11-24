@@ -174,10 +174,13 @@ class AutoTrackProgress:
     def text(self) -> str:
         return self._dlg.labelText() if self._dlg is not None else ""
 
-    def update(self, stage, line_mm, total_mm, k=0, n=0) -> None:
+    def update(self, stage, line_mm, total_mm, k=0, n=0, name="") -> None:
         if self._dlg is None:
             return
-        if stage == "trunk":
+        if stage == "batch":                 # 一括描出: line k of n
+            s = t("一括描出 {k} / {n}：「{nm}」を近位へ追跡中… {a:.0f} mm",
+                  k=k, n=n, nm=name, a=line_mm)
+        elif stage == "trunk":
             s = t("幹を追跡中… {a:.0f} mm（合計 {b:.0f} mm）", a=line_mm,
                   b=total_mm)
         else:

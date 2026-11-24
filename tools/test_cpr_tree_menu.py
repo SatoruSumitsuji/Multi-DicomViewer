@@ -448,7 +448,8 @@ class TW:
 
 
 check("no DetailName / FixName columns any more",
-      ctw._N_COLS == 7 and not hasattr(ctw, "_C_DETAIL")
+      ctw._N_COLS == 6 and not hasattr(ctw, "_C_AUTO")
+      and not hasattr(ctw, "_C_DETAIL")
       and not hasattr(ctw, "_C_FIX") and ctw._XHeader.PLUS_COLS == ())
 check("no per-line FixName actions left",
       not hasattr(W, "_fix_name_copy_all") and not hasattr(W, "_set_fix_name_bulk"))

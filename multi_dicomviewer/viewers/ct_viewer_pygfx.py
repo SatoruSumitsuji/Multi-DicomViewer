@@ -19846,6 +19846,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
+        # 一括描出 (user 2026-11-25): every unconnected branch line traced
+        # PROXIMALLY to the tree in one go (between Draw and Auto).
+        self._cpr_batch_btn = FitButton(t("一括描出"))
+        self._cpr_batch_btn.setHelpToolTip(t(
+            "一括描出：各枝の末梢に置いた短い CPR 線（未接続の枝すべて）を、"
+            "Auto-Track で近位へ順番に延長し、既存の CPR 線（分岐部）に着いたら"
+            "接続します。到達した線は FinTrace ◯、途中で止まった線は × になり、"
+            "次の枝へ進みます。先に LM / LAD / LCX / RCA を描いておいてください"))
+        self._cpr_batch_btn.clicked.connect(self._coro_batch_extend)
+        row.addWidget(self._cpr_batch_btn)
         # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
         # _cpr_vr_build_group, built in _build_lv_bar.)
         # Fit / Snap buttons REMOVED (user 2026-11-16): every edit point is
