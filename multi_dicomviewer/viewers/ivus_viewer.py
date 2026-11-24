@@ -401,8 +401,13 @@ class IVUSViewer(XAViewer):
         self._angle_info = _AutoHideLabel("")
         self._angle_info.setStyleSheet("color:#27e0c0; padding:2px 6px;")
         self._angle_info.setVisible(False)
-        self.layout().insertWidget(
-            self.layout().indexOf(self.readout), self._angle_info)
+        # It must go in the SAME below-image column as the readout (inside the
+        # height-capped chrome scroll): appended to the main layout instead (the
+        # readout isn't in it → index -1 = the end), it took its height from
+        # that scroll area and clipped the seek-bar handle's lower half
+        # (user 2026-11-24).
+        _bl = self.readout.parentWidget().layout()
+        _bl.insertWidget(_bl.indexOf(self.readout), self._angle_info)
         # Seek-bar angle markers are interactive: click → jump to that key's
         # frame (then rotate + Angle Set to update it); right-click → Delete.
         if hasattr(self, "_range_marks"):

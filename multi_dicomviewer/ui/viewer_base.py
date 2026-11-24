@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QEvent, QSize, Qt
 from PyQt6.QtWidgets import QFrame, QScrollArea, QWidget
 
 from multi_dicomviewer.core.dicom_io import LoadedSeries
@@ -29,6 +29,22 @@ class _ChromeScrollArea(QScrollArea):
     shell's "Max Image" walk recurses into it (toggling the inner bars) rather
     than hiding the whole container."""
     _mdv_chrome_scroll = True
+
+    def setWidget(self, w) -> None:  # noqa: N802 (Qt override)
+        super().setWidget(w)
+        if w is not None:
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):  # noqa: N802 (Qt override)
+        # The content's layout changed (a row / status line shown or hidden):
+        # re-announce our sizeHint so the parent layout re-sizes us to the new
+        # content height. A QScrollArea doesn't do this by itself, so a line
+        # appearing under the seek bar (IVUS "Angle keyframes — …") used to be
+        # squeezed into the old height and clip the seek-bar handle
+        # (user 2026-11-24).
+        if obj is self.widget() and ev.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+        return super().eventFilter(obj, ev)
 
     def _wants_hbar(self) -> bool:
         """The content is WIDER than the viewport → a horizontal scrollbar will
