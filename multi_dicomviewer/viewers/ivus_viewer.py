@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
-from multi_dicomviewer.core import coreg
+from multi_dicomviewer.core import coreg, view_xform
 from multi_dicomviewer.core.dicom_io import apply_color_mode_to_planes
 from multi_dicomviewer.core.image_export import export_image_as, safe_basename
 from multi_dicomviewer.core.settings import load_ivus_color, save_ivus_color
@@ -275,6 +275,7 @@ class IVUSViewer(XAViewer):
             # the long-axis plane (live draft, then full rebuild on release).
             c.ivus_angle_changed.connect(self._on_la_angle_set)
             c.ivus_angle_finished.connect(self._on_la_rotation_finished)
+            c.ivus_view_xform_seen.connect(self._on_view_xform_seen)
 
         # The inherited (XA) series-nav row already runs Series…Flip-H/Flip-V
         # and would overflow with the IVUS controls added on the end. So the
@@ -845,6 +846,9 @@ class IVUSViewer(XAViewer):
             self._angle_info.setText(t("Angle keyframes — {list}", list=parts))
         else:
             self._angle_info.setText("")
+        # The strip follows each frame's rotation → re-sync it to the keys.
+        if getattr(self, "_la_wl_timer", None) is not None:
+            QTimer.singleShot(0, self._on_view_xform_seen)
 
     def _reset_transform(self) -> None:
         """Reset also drops the per-frame angle keyframes (back to a single,
@@ -1033,19 +1037,69 @@ class IVUSViewer(XAViewer):
             # (same physical extent as the full strip), then upscale the rows
             # back to `lateral` — otherwise the preview would sample only the
             # central 1/k and look vertically zoomed-in.
+            dirs = self._la_raw_dirs(len(frames))
             small = build_long_axis(
                 frames[::k], center_pairs[::k], self._la_angle,
-                lat_small, to_u8, step=k,
+                lat_small, to_u8, step=k, dirs=dirs[::k],
             )
             up = np.repeat(np.repeat(small, k, axis=0), k, axis=1)
             img = np.ascontiguousarray(up[:lateral, :len(frames)])
         else:
             img = build_long_axis(
-                frames, center_pairs, self._la_angle, lateral, to_u8
+                frames, center_pairs, self._la_angle, lateral, to_u8,
+                dirs=self._la_raw_dirs(len(frames)),
             )
         self._la_img = img
+        self._la_built_sig = self._la_xform_sig()
         self.long_axis.set_image(img)
         self.long_axis.set_current_frame(self._frame)
+
+    # ------------------ long-axis ↔ displayed cross-section (rotation / flip)
+    def _frame_rotations(self, n: int) -> np.ndarray:
+        """Each frame's on-screen free rotation (degrees): the Multi-Rot angle
+        keyframes interpolated per frame, or the single current rotation when
+        there are no keyframes (it then applies to every frame)."""
+        if self._angle_kf:
+            pairs = list(self._angle_kf.items())
+            out = np.empty(n, dtype=np.float64)
+            for f in range(n):
+                a = coreg.map_rotation(pairs, f)
+                out[f] = float(a) if a is not None else 0.0
+            return out
+        return np.full(n, float(self.canvas.free_rotation()))
+
+    def _la_raw_dirs(self, n: int) -> np.ndarray:
+        """(n, 2) RAW-frame unit directions of the on-screen cut line
+        (``_la_angle``, a SCREEN angle) for every frame — undoing that frame's
+        free rotation and the flip / 90° turns, so the strip shows exactly the
+        section the yellow line marks on the displayed image. Without this a
+        ~180° Multi-Rot rotation showed the red and blue sides swapped on the
+        strip (user 2026-11-24)."""
+        flip, rot = self.canvas.orient_state()
+        return view_xform.view_dirs_to_raw(
+            math.cos(self._la_angle), math.sin(self._la_angle), flip, rot,
+            self._frame_rotations(n))
+
+    def _la_xform_sig(self):
+        """What the strip's raw directions depend on besides the cut angle."""
+        flip, rot = self.canvas.orient_state()
+        if self._angle_kf:
+            rot_part = tuple(sorted((int(f), round(float(a), 4))
+                                    for f, a in self._angle_kf.items()))
+        else:
+            rot_part = round(float(self.canvas.free_rotation()), 4)
+        return (bool(flip), int(rot), rot_part)
+
+    def _on_view_xform_seen(self) -> None:
+        """The cross-section's flip / turn / rotation changed (any path):
+        rebuild the strip if it was built for a different transform — a cheap
+        draft now, the crisp one once it settles."""
+        if not (self._la_visible and self._planes and self._la_centers):
+            return
+        if getattr(self, "_la_built_sig", None) == self._la_xform_sig():
+            return
+        self._rebuild_long_axis(draft=True)
+        self._la_wl_timer.start()             # settle → full-res rebuild
 
     # ----------------------------- mouse callbacks (long-axis canvas)
     def _on_la_rotated(self, dtheta: float) -> None:

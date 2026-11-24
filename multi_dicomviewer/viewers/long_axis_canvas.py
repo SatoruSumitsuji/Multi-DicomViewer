@@ -49,6 +49,7 @@ def build_long_axis(
     lateral_samples: int,
     apply_u8: callable,
     step: float = 1.0,
+    dirs=None,
 ) -> np.ndarray:
     """Render one (lateral_samples, n_frames) uint8 image.
 
@@ -64,10 +65,23 @@ def build_long_axis(
     Default 1.0 samples every pixel across the cut. A larger step covers the
     SAME physical extent with fewer samples (``lateral_samples``) — used for
     a coarse, fast low-LOD preview that still spans the full vessel depth.
+
+    *dirs*, when given, is an (n, 2) array of per-frame unit cut directions in
+    RAW frame coords (overriding *angle_rad*): the cut line the user sees on
+    screen carried back through each frame's own rotation / flip, so the
+    strip matches the displayed cross-section frame by frame.
     """
     n = len(frames)
     half = (lateral_samples - 1) / 2.0
     ux, uy = math.cos(angle_rad), math.sin(angle_rad)
+    if dirs is not None:
+        d = np.asarray(dirs, dtype=np.float64).reshape(-1, 2)
+        if len(d) != n:
+            raise ValueError("dirs must have one row per frame")
+        uxs, uys = d[:, 0], d[:, 1]
+    else:
+        uxs = np.full(n, ux)
+        uys = np.full(n, uy)
     # Row 0 (strip TOP) samples the +(ux,uy) end of the cut line, the last
     # row (strip BOTTOM) the −(ux,uy) end — so the strip's top lines up with
     # the cross-section's cyan projection triangle (at +(ux,uy)) and the
@@ -89,9 +103,9 @@ def build_long_axis(
         h, w = vol.shape[1], vol.shape[2]
         cx = np.asarray([c[0] for c in centers], dtype=np.float64)
         cy = np.asarray([c[1] for c in centers], dtype=np.float64)
-        # (n, lateral) integer sample coordinates.
-        xs = np.rint(cx[:, None] + dxs[None, :]).astype(np.int64)
-        ys = np.rint(cy[:, None] + dys[None, :]).astype(np.int64)
+        # (n, lateral) integer sample coordinates (per-frame direction).
+        xs = np.rint(cx[:, None] + r[None, :] * uxs[:, None]).astype(np.int64)
+        ys = np.rint(cy[:, None] + r[None, :] * uys[:, None]).astype(np.int64)
         mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
         fi = np.arange(n)[:, None]                      # (n, 1) frame index
         gathered = vol[fi, np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)]
@@ -117,8 +131,8 @@ def build_long_axis(
             continue
         h, w = f.shape[:2]
         cx, cy = centers[i]
-        xs = np.rint(cx + dxs).astype(np.int32)
-        ys = np.rint(cy + dys).astype(np.int32)
+        xs = np.rint(cx + r * uxs[i]).astype(np.int32)
+        ys = np.rint(cy + r * uys[i]).astype(np.int32)
         mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
         if is_color:
             # Sample RGB. A stray grayscale frame in a colour strip is

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
+from multi_dicomviewer.core import view_xform
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
@@ -115,6 +116,11 @@ class ImageCanvas(QWidget):
     #: bottom. ``ivus_angle_finished`` fires on release so the host can
     #: rebuild the strip at full resolution (the drag previews at draft LOD).
     ivus_angle_changed = pyqtSignal(float)
+    #: (flip, rot, free_deg) changed while the IVUS long-axis guide is shown —
+    #: emitted (queued) from paint, so EVERY path that turns / flips the
+    #: image (buttons, Reset, mouse grid, Multi-Rot keyframes) reaches the
+    #: viewer, which rebuilds the long-axis strip when it no longer matches.
+    ivus_view_xform_seen = pyqtSignal()
     ivus_angle_finished = pyqtSignal()
     #: Right-click ▸ Change W/L on the image → the host (XA/IVUS viewer)
     #: opens its small Window/Level popup. The canvas doesn't own the W/L
@@ -711,6 +717,34 @@ class ImageCanvas(QWidget):
                 r.y() + pt[1] / h * r.height())
 
     # ----------------------------------------------------- IVUS centre helpers
+    def _view_xform(self):
+        """(raw_w, raw_h, flip, rot, free_deg) of what is shown, or None."""
+        f = self._raw_frame8
+        if f is None:
+            return None
+        return (float(f.shape[1]), float(f.shape[0]), bool(self._t_flip),
+                int(self._t_rot % 4), float(self._free_rot))
+
+    def raw_to_view_pt(self, x: float, y: float) -> tuple[float, float]:
+        """RAW-frame (x, y) → where it is SEEN (oriented + free-rotated image
+        coords; then _image_to_widget_f for widget px)."""
+        xf = self._view_xform()
+        if xf is None:
+            return (float(x), float(y))
+        return view_xform.raw_to_view(x, y, *xf)
+
+    def view_to_raw_pt(self, x: float, y: float) -> tuple[float, float]:
+        xf = self._view_xform()
+        if xf is None:
+            return (float(x), float(y))
+        return view_xform.view_to_raw(x, y, *xf)
+
+    def _ivus_center_view(self) -> tuple[float, float]:
+        """``ivus_center_image`` is in RAW frame coords (the long-axis samples
+        the raw frames); this is where that point is seen on screen."""
+        cx, cy = self.ivus_center_image
+        return self.raw_to_view_pt(cx, cy)
+
     def _ivus_center_widget(self) -> QPoint | None:
         """Centre marker's position in widget pixels, or None when the
         marker isn't displayed yet (no image set, or feature off)."""
@@ -718,7 +752,7 @@ class ImageCanvas(QWidget):
                 or self.ivus_center_image is None
                 or self._img_size == (0, 0)):
             return None
-        return self._image_to_widget(self.ivus_center_image)
+        return self._image_to_widget(self._ivus_center_view())
 
     def _hit_ivus_center(self, sx: float, sy: float,
                          radius: float = 12.0) -> bool:
@@ -738,7 +772,7 @@ class ImageCanvas(QWidget):
                 or self.ivus_center_image is None
                 or self._img_size == (0, 0)):
             return None
-        cx_i, cy_i = self.ivus_center_image
+        cx_i, cy_i = self._ivus_center_view()
         a = float(self.ivus_la_angle)
         w_img, h_img = self._img_size
         half = math.hypot(w_img, h_img) / 2.0
@@ -773,7 +807,7 @@ class ImageCanvas(QWidget):
         if self.ivus_center_image is None:
             return
         ix, iy = self._widget_to_image_f(sx, sy)
-        cx_i, cy_i = self.ivus_center_image
+        cx_i, cy_i = self._ivus_center_view()
         dx, dy = ix - cx_i, iy - cy_i
         if math.hypot(dx, dy) < 1e-3:
             return
@@ -1774,9 +1808,13 @@ class ImageCanvas(QWidget):
         if self._ivus_dragging_center:
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is not None:
-                w, h = self._img_size
-                cx = max(1.0, min(float(pt[0]), float(w - 1)))
-                cy = max(1.0, min(float(pt[1]), float(h - 1)))
+                # Seen point → RAW frame coords (undo the free rotation and
+                # the flip / 90° turns), clamped to the raw frame.
+                rx, ry = self.view_to_raw_pt(float(pt[0]), float(pt[1]))
+                xf = self._view_xform()
+                w, h = (xf[0], xf[1]) if xf else self._img_size
+                cx = max(1.0, min(float(rx), float(w - 1)))
+                cy = max(1.0, min(float(ry), float(h - 1)))
                 self.ivus_center_image = (cx, cy)
                 self.ivus_center_changed.emit(cx, cy)
                 self.update()
@@ -2204,6 +2242,11 @@ class ImageCanvas(QWidget):
                 and self.ivus_center_image is not None
                 and self._img_size != (0, 0)):
             self._paint_ivus_long_axis(p)
+            xf = (bool(self._t_flip), int(self._t_rot % 4),
+                  round(float(self._free_rot), 4))
+            if xf != getattr(self, "_ivus_xf_seen", None):
+                self._ivus_xf_seen = xf
+                QTimer.singleShot(0, self.ivus_view_xform_seen.emit)
 
         # IVUS–XA co-registration overlay (guide curve + anchors + marker),
         # drawn on top of everything in the dedicated CoReg window.
@@ -2340,7 +2383,10 @@ class ImageCanvas(QWidget):
         * the rotation-centre dot (red = keyed/fixed, blue = interpolated/
           movable), with a white crosshair for visibility on grey IVUS.
         """
-        cx_i, cy_i = self.ivus_center_image
+        # The centre is stored in RAW frame coords; draw it where it is SEEN
+        # (through the flip / 90° turns and the free / Multi-Rot rotation) so it
+        # stays on the same anatomy. The cut line keeps its SCREEN angle.
+        cx_i, cy_i = self._ivus_center_view()
         a = float(self.ivus_la_angle)
         w_img, h_img = self._img_size
         half = math.hypot(w_img, h_img) / 2.0          # full lateral extent
