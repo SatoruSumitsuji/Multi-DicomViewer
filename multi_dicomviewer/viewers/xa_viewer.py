@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.core.study_model import Modality
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import settings
@@ -554,6 +555,9 @@ class XAViewer(AbstractViewer):
     #: plane_path). plane_path is the clicked biplane plane's own .dcm file
     #: ("" = whole series, e.g. single-plane / IVUS).
     plane_export_requested = pyqtSignal(str, str, str)
+    #: right-click ▸ "Open as Intravascular Image" (True) / "Open as Original
+    #: Image" (False): the shell re-opens this series in the matching viewer.
+    intravascular_requested = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -878,6 +882,9 @@ class XAViewer(AbstractViewer):
         plane: for a biplane series we pass that plane's own .dcm file so
         only that side is exported; single-plane / IVUS export the whole
         series."""
+        if fmt_key in ("iv-open", "iv-orig"):
+            self.intravascular_requested.emit(fmt_key == "iv-open")
+            return
         canvas = self.sender()
         if not isinstance(canvas, ImageCanvas):
             canvas = self.canvas
@@ -890,6 +897,21 @@ class XAViewer(AbstractViewer):
         # grab() captures the painted widget verbatim (WYSIWYG), at the
         # display's devicePixelRatio so Retina exports stay full-res.
         export_image_as(self, canvas.grab(), fmt_key, self._export_basename())
+
+    def _set_iv_menu_item(self, loaded) -> None:
+        """Image right-click item (user 2026-11-24): a non-XA image shown here
+        (US / OT … that the app did not recognise as intravascular) offers
+        "Open as Intravascular Image"; one the user opened that way offers
+        "Open as Original Image". Never offered on a real XA angiogram or on
+        a genuine IVUS / OCT / OFDI."""
+        item = None
+        mod = getattr(loaded, "modality", None)
+        if mod is Modality.OTHER:
+            item = (t("Open as Intravascular Image"), "iv-open")
+        elif mod is Modality.IVUS and getattr(loaded, "iv_forced", False):
+            item = (t("Open as Original Image"), "iv-orig")
+        for c in (self.canvas, self.canvas2):
+            c.iv_menu_item = item
 
     def _clicked_plane_path(self, canvas) -> str:
         """The .dcm file backing the right-clicked canvas, but only for a
@@ -1712,6 +1734,7 @@ class XAViewer(AbstractViewer):
 
     # ------------------------------------------------- AbstractViewer impl.
     def load_series(self, loaded: LoadedSeries, title: str) -> None:
+        self._set_iv_menu_item(loaded)
         # Same series as the one already loaded? Preserve everything —
         # frame index, W/L, measurements, zoom — so returning to this
         # series from a different modality resumes exactly where the

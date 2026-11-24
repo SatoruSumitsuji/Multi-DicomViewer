@@ -946,6 +946,8 @@
   "Open VR": "打开 VR",
   "Open a DICOM folder to begin.": "打开一个 DICOM 文件夹以开始。",
   "Open a short-axis (CPR) first.": "请先打开短轴 (CPR)。",
+  "Open as Intravascular Image": "作为血管内图像打开",
+  "Open as Original Image": "作为原始图像打开",
   "Open one or more individual DICOM files (not the whole folder)": "打开一个或多个单独的 DICOM 文件（而非整个文件夹）",
   "Open the panes' IVUS series in a synchronised viewer (only available in the 1×2 / 2×1 / 2×2 layout)": "在同步查看器中打开各窗格的 IVUS 序列（仅在 1×2 / 2×1 / 2×2 布局下可用）",
   "Optimal GC-target assessment angle:": "GC-目标评估最佳角度:",

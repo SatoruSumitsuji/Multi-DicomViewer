@@ -52,12 +52,21 @@ def icon_img():
     return lab.pixmap().toImage()
 
 
+def shows(mode):
+    """The label shows the icon's *mode* picture (Normal = colour emoji,
+    Disabled = grey). Compared by pixels, not by colour: under the offscreen
+    test platform the emoji font itself renders without colour."""
+    want = p._thumb_size_qicon.pixmap(QSize(16, 16), mode).toImage()
+    return icon_img() == want
+
+
 check("start in Tree view: slider disabled", not p.thumb_size.isEnabled())
-check("start in Tree view: 🖼 icon grey", grey(icon_img()))
+check("start in Tree view: 🖼 icon grey",
+      grey(icon_img()) and shows(QIcon.Mode.Disabled))
 p._show(1)
 app.processEvents()
 check("Thumbnail view: slider enabled", p.thumb_size.isEnabled())
-check("Thumbnail view: 🖼 icon in colour", not grey(icon_img()))
+check("Thumbnail view: 🖼 icon in colour", shows(QIcon.Mode.Normal))
 v0 = p.thumb_size.value()
 p.btn_info.click()
 app.processEvents()
@@ -67,7 +76,7 @@ check("the size value is kept", p.thumb_size.value() == v0)
 p.btn_thumb.click()
 app.processEvents()
 check("Thumbnail (button click): enabled again",
-      p.thumb_size.isEnabled() and not grey(icon_img()))
+      p.thumb_size.isEnabled() and shows(QIcon.Mode.Normal))
 check("the icon keeps its tooltip",
       bool(lab.toolTip()) and lab.toolTip() == p.thumb_size.toolTip())
 if os.environ.get("MDV_SHOT"):                 # widget-only grabs for review
@@ -77,7 +86,6 @@ if os.environ.get("MDV_SHOT"):                 # widget-only grabs for review
     p._show(1)
     app.processEvents()
     p.grab().save(os.path.join(os.environ["MDV_SHOT"], "thumb.png"))
-_ = (QIcon, QSize)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED")
 sys.stdout.flush()
 os._exit(1 if FAILS else 0)

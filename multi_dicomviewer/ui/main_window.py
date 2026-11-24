@@ -9072,6 +9072,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(t("Viewers cleared."))
 
     # ------------------------------------- per-viewer signal/option wiring
+    def _open_as_intravascular(self, viewer, on: bool) -> None:
+        """Right-click ▸ "Open as Intravascular Image" (*on*) / "Open as
+        Original Image": re-open the pane's series in the IVUS viewer (rotation,
+        long axis, …) or back in the original one. Remembered per series in the
+        settings (kept across restarts); the DICOM files are not touched."""
+        pane = self._pane_of_viewer(viewer)
+        if pane is None:
+            return
+        se = self._series_by_uid.get(pane.shown_series_uid())
+        if se is None:
+            return
+        if on and se.modality is not Modality.OTHER:
+            return
+        if not on and not getattr(se, "iv_forced", False):
+            return
+        se.modality = Modality.IVUS if on else Modality.OTHER
+        se.iv_forced = bool(on)
+        settings.save_intravascular_series(se.series_uid, on)
+        # Free the outgoing viewer's copy so the series is decoded afresh in
+        # the new viewer (and a later switch back reloads cleanly).
+        try:
+            viewer.clear()
+            viewer._loaded_uid = ""
+        except Exception:                                # noqa: BLE001
+            pass
+        self._open_series(se, pane)
+
     def _wire_viewer(self, viewer) -> None:
         """Connect a freshly built viewer's signals and push current
         display options onto it."""
@@ -9104,6 +9131,9 @@ class MainWindow(QMainWindow):
         # clicked plane.
         if hasattr(viewer, "plane_export_requested"):
             viewer.plane_export_requested.connect(self._on_plane_export)
+        if hasattr(viewer, "intravascular_requested"):
+            viewer.intravascular_requested.connect(
+                lambda on, vv=viewer: self._open_as_intravascular(vv, on))
         # Right-click ▸ Export DICOM (Screen) → whole displayed pane area as one
         # Secondary-Capture DICOM.
         if hasattr(viewer, "screen_export_requested"):

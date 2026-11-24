@@ -1125,6 +1125,8 @@ class ImageCanvas(QWidget):
             self, self.mapToGlobal(QPoint(int(sx), int(sy))),
             include_dicom=True, include_mp4=True, include_anon=True,
             include_wl=True, wl_enabled=self.wl_enabled,
+            extra=([self.iv_menu_item]
+                   if getattr(self, "iv_menu_item", None) else None),
         )
         if key == "wl":
             self.wl_change_requested.emit()

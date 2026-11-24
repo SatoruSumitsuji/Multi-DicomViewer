@@ -72,6 +72,7 @@ def pick_export_format(
     include_wl: bool = False,
     wl_enabled: bool = True,
     include_screen: bool = False,
+    extra: Optional[list] = None,
 ) -> Optional[str]:
     """Show the right-click export menu at *global_point*; return the chosen
     format key, or None if dismissed.
@@ -106,6 +107,10 @@ def pick_export_format(
         wl_act = menu.addAction("Change W/L…")
         wl_act.setEnabled(bool(wl_enabled))
         acts.append((wl_act, "wl"))
+    if extra:                       # [(label, key)] below a separator
+        menu.addSeparator()
+        for label, key in extra:
+            acts.append((menu.addAction(label), key))
     chosen = menu.exec(global_point)
     for act, key in acts:
         if act is chosen:

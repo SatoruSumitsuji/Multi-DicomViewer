@@ -18,6 +18,10 @@ TAG_CONDITIONS_PATH = SETTINGS_DIR / "tag_conditions.json"
 EXPORT_FIELDS_PATH = SETTINGS_DIR / "export_fields.json"
 ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
 IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
+#: Series the user opened as an intravascular image (right-click ▸ "Open
+#: as Intravascular Image") — kept across restarts; the DICOM files
+#: themselves are never written to.
+INTRAVASCULAR_PATH = SETTINGS_DIR / "intravascular_series.json"
 DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
 LANGUAGE_PATH = SETTINGS_DIR / "language.json"
 DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
@@ -454,6 +458,36 @@ def save_export_fields_by_modality(by_mod: dict) -> None:
 # that choice keyed by SeriesInstanceUID so re-opening the same series restores
 # colour automatically. Grayscale (the default) is NOT stored — absence means
 # grayscale — so the file only ever lists series the user explicitly coloured.
+def load_intravascular_series() -> set:
+    """SeriesInstanceUIDs the user chose to open as an intravascular image
+    (IVUS viewer: rotation, long axis, …). Best-effort; empty when unset."""
+    try:
+        data = json.loads(INTRAVASCULAR_PATH.read_text(encoding="utf-8"))
+        uids = data.get("series") if isinstance(data, dict) else None
+        return {str(u) for u in uids} if isinstance(uids, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_intravascular_series(series_uid: str, on: bool) -> None:
+    """Add (*on*) or remove one series from the intravascular list."""
+    if not series_uid:
+        return
+    uids = load_intravascular_series()
+    if on:
+        uids.add(str(series_uid))
+    else:
+        uids.discard(str(series_uid))
+    try:
+        SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        INTRAVASCULAR_PATH.write_text(
+            json.dumps({"series": sorted(uids), "version": 1},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
 def load_ivus_color(series_uid: str) -> bool:
     """True if the user previously chose colour display for this IVUS series.
     Best-effort; defaults to False (grayscale) when unset or unreadable."""

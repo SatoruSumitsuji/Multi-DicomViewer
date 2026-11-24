@@ -34,8 +34,23 @@ class Modality(str, Enum):
     OTHER = "OTHER"
 
     @classmethod
-    def from_dicom(cls, value: Optional[str]) -> "Modality":
+    def from_dicom(cls, value: Optional[str],
+                   image_type=None) -> "Modality":
+        """Map a DICOM Modality code to the viewer modality. *image_type* (the
+        ImageType values) lets an older IVUS exported as plain "US" — US
+        Multi-frame with ImageType value 3 = INTRAVASCULAR (the DICOM defined
+        term) — open in the IVUS viewer too, with its rotation, long axis, etc.
+        (user 2026-11-24: those used to open in the XA viewer and could not be
+        rotated)."""
         v = (value or "").upper()
+        if v == "US" and image_type is not None:
+            try:
+                vals = ([image_type] if isinstance(image_type, str)
+                        else list(image_type))
+            except TypeError:
+                vals = [image_type]
+            if any(str(x).strip().upper() == "INTRAVASCULAR" for x in vals):
+                return cls.IVUS
         if v == "XA":
             return cls.XA
         if v == "CT":
@@ -58,6 +73,10 @@ class Series:
     #: Kept verbatim for display so kinds the app doesn't specially
     #: handle show their real code instead of a generic "OTHER".
     dicom_modality: str = ""
+    #: True when the user opened this (non-XA, non-IVUS) series as an
+    #: intravascular image (right-click ▸ "Open as Intravascular Image"):
+    #: its modality is then IVUS until "Open as Original Image".
+    iv_forced: bool = field(default=False, compare=False)
     #: Sortable acquisition timestamp ("YYYYMMDDHHMMSS.ffff" style, from
     #: AcquisitionDateTime / AcquisitionDate+Time). "" sorts last.
     acq_time: str = ""

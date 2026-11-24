@@ -946,6 +946,8 @@
   "Open VR": "Abrir VR",
   "Open a DICOM folder to begin.": "Abre una carpeta DICOM para comenzar.",
   "Open a short-axis (CPR) first.": "Abra primero un eje corto (CPR).",
+  "Open as Intravascular Image": "Abrir como imagen intravascular",
+  "Open as Original Image": "Abrir como imagen original",
   "Open one or more individual DICOM files (not the whole folder)": "Abrir uno o más archivos DICOM individuales (no toda la carpeta)",
   "Open the panes' IVUS series in a synchronised viewer (only available in the 1×2 / 2×1 / 2×2 layout)": "Abrir las series IVUS de los paneles en un visor sincronizado (disponible solo en la disposición 1×2 / 2×1 / 2×2)",
   "Optimal GC-target assessment angle:": "Ángulo óptimo de evaluación GC-objetivo:",

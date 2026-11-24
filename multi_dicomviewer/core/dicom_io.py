@@ -406,6 +406,11 @@ def _build_tree(
     scan_folder (recursive walk) and index_files (explicit file list)."""
     patients: dict[str, Patient] = {}
     frames_by_path: dict[str, int] = {}   # NumberOfFrames per file, for counts
+    try:                                  # user's "Open as Intravascular Image"
+        from . import settings as _settings
+        iv_uids = _settings.load_intravascular_series()
+    except Exception:                                    # noqa: BLE001
+        iv_uids = set()
 
     total = len(all_files)
     if progress is not None:
@@ -452,7 +457,8 @@ def _build_tree(
                 raw_mod = str(_safe(ds, "Modality")).strip().upper()
                 series = Series(
                     series_uid=se_uid,
-                    modality=Modality.from_dicom(raw_mod),
+                    modality=Modality.from_dicom(
+                        raw_mod, getattr(ds, "ImageType", None)),
                     description=decode_text(ds, "SeriesDescription"),
                     number=int(num) if str(num).strip().isdigit() else None,
                     acq_number=(
@@ -466,6 +472,9 @@ def _build_tree(
                     dicom_modality=raw_mod,
                     acq_time=_acq_key(ds),
                 )
+                if series.modality is Modality.OTHER and se_uid in iv_uids:
+                    series.modality = Modality.IVUS
+                    series.iv_forced = True
                 study.series[se_uid] = series
             series.files.append(path)
             frames_by_path[path] = int(
@@ -978,6 +987,9 @@ class LoadedSeries:
     #: Folder the series' files were read from (dirname of files[0]), so
     #: viewers can default Save/Load/Export dialogs to where the data lives.
     source_dir: str = ""
+    #: The series was opened as an intravascular image by the user (see
+    #: Series.iv_forced) — the IVUS viewer then offers "Open as Original Image".
+    iv_forced: bool = False
 
 
 def _imager_spacing(ds) -> Optional[tuple[float, float]]:
@@ -1744,6 +1756,7 @@ def load_xa(
         is_color=is_color,
         header=_read_header(planes[0].path),
         series_uid=series.series_uid,
+        iv_forced=bool(getattr(series, "iv_forced", False)),
     )
 
 
