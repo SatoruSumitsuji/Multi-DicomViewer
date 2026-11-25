@@ -17789,6 +17789,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._refresh(reset_cam=False)
         if first:
             self._lv_sax_apply_default_scale()
+            # The reslice samples ONLY the visible viewport of the camera it was
+            # built with; the default scale/centre just changed it, so re-reslice
+            # — else the part newly in view (the apex, lower third of the
+            # long-axis pane) stayed black until the first nudge (user
+            # 2026-11-25).
+            self._refresh(reset_cam=False)
             self._update_cross(la)
             # Redraw the long-axis overlays (level line + ○ handle + move-arrows)
             # for the current camera so they show + hit-test immediately on entry
@@ -17866,6 +17872,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         self._lv_sax_apply_default_scale()
         la, sa = lv["pane"], lv["sax_pane"]
+        # re-reslice for the settled pane size + the default camera (the
+        # viewport-only reslice of the pre-relayout view left the apex black)
+        self._refresh(reset_cam=False)
         self._redraw_lv(la)
         for k in (la, sa):
             self.pane[k].render()
