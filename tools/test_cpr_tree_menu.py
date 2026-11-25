@@ -235,12 +235,16 @@ for fname in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           "QtPoint": lambda *a: a, "add_color_submenu": add_color_submenu,
           "add_transparency_submenu": add_transparency_submenu,
           "QTimer": type("QT", (), {"singleShot": staticmethod(lambda *a: None)})}
-    for fn in ("_outline_right", "_handle_right"):
+    for fn in ("_outline_right", "_handle_right", "_nearest_vertex"):
         exec(compile(_func_src(fname, fn), fname, "exec"), ns)
 
     class VHost(Host):
         _outline_right = ns["_outline_right"]
         _handle_right = ns["_handle_right"]
+        _nearest_vertex = ns["_nearest_vertex"]
+
+        def _disp_to_world(self, w, sx, sy):
+            return float(sx), float(sy)
 
         def _meas_pane_snap(self, w):
             return []

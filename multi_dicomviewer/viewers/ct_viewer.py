@@ -4207,6 +4207,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_mv_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_mvapex_rclick())
         row1.addWidget(self._lv_mv_btn)
+        # Load (user 2026-11-25): a saved .FullLv.json, like dropping it
+        self._lv_full_load_btn = FitButton(t("Load"))
+        self._lv_full_load_btn.setHelpToolTip(t(
+            "保存した .FullLv.json を読み込み、LV 解析（MV-AoV / Apex / Epi / "
+            "Blood-Endo）を一括で表示します。"))
+        self._lv_full_load_btn.setStyleSheet(self._BTN_DIS)
+        self._lv_full_load_btn.clicked.connect(
+            lambda _=False: self._lv_load_full_file())
+        row1.addWidget(self._lv_full_load_btn)
         self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
             t("Set the COMMON AoV plane (shared by Epi / Blood-Endo): opens the "
@@ -4835,6 +4844,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # NOTE: _lv_endo_btn is a hidden internal flag (merged into Blood/Endo) —
         # excluded so it is never force-shown.
         self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
+                              self._lv_full_load_btn,
                               self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]
@@ -4914,6 +4924,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         bar then)."""
         if getattr(self, "_territory_display", False):
             return False                      # territory review → Territory bar
+        try:
+            if self._ct_current_mode() != "coronary":
+                return False                  # Simple View / LV: LV is usable
+        except Exception:                                # noqa: BLE001
+            pass
         # A docked coronary tree for this CT shows up as the 2-D overlay AND/OR the
         # VR spec (pushed even while ツリー表示 is OFF) — either means CoronaryTreeモード.
         if (getattr(self, "_coro_overlay", None) is None
@@ -5776,6 +5791,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # and grey ALL while an Epi/Blood sub-mode is active — the SAME grey-out
         # as Epi/Blood when they have no data; once data is set the button shows
         # its own colour (see _lv_soft_gray + _lv_update_valve_buttons).
+        if getattr(self, "_lv_full_load_btn", None) is not None:
+            self._lv_full_load_btn.setEnabled(
+                sm is None and ve is None and not ax)
         if getattr(self, "_lv_mv_btn", None) is not None:
             self._lv_soft_gray(
                 self._lv_mv_btn, (ve in (None, "mitral")) and sm is None and not ax,
@@ -5865,7 +5883,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                       getattr(self, "_lv_epi_btn", None),
                       getattr(self, "_lvv_start_btn", None),
                       getattr(self, "_lv_endo_btn", None),
-                      getattr(self, "_full_lv_btn", None)):
+                      getattr(self, "_full_lv_btn", None),
+                      getattr(self, "_lv_full_load_btn", None)):
                 if b is not None:
                     b.setEnabled(False)
         self._lv_sync_cpr_btn()
@@ -11190,6 +11209,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         in 2-D native-slice mode."""
         measuring = getattr(self, "_meas_on", False) and bool(
             getattr(self, "_meas_type", None))
+        if getattr(self, "_frames", None):
+            self._update_active_frames()     # orange frame while Alt is needed
         is2d = getattr(self, "_mode", "3D") == "2D"
         # LV Trace/SAX (axis-locked long-axis OR SAX display): Rotate/Spin/Paging
         # are DISABLED (re-tilt / long-axis shift); Zoom/Move/Thick/WL stay live.
@@ -16204,6 +16225,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         m = self._measures[which][mi]
         menu = QMenu(self)
         add_pt = menu.addAction(t("Add point"))
+        # 点の削除 right below (user 2026-11-25): the edit point nearest the
+        # click (a Polyline / Polygon that keeps ≥ 2 points)
+        del_near = None
+        near_vi = self._nearest_vertex(which, mi, sx, sy)
+        if m["type"] in ("polyline", "polygon") and near_vi is not None:
+            del_near = menu.addAction(t("Delete point"))
+            del_near.setEnabled(len(m["pts"]) > 2)
         _tag = m.get("_lv")
         if (_tag is not None and _tag[1] == "epi" and self._lv is not None
                 and self._lv["model"].epi_sax_levels is not None):
@@ -16266,7 +16294,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return                               # each redraws itself
         _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
         _mr_changed = False
-        if chosen is add_pt:
+        if del_near is not None and chosen is del_near:
+            self._delete_point(which, mi, near_vi)
+            _mr_changed = True
+            if self._cpr_is_src(which, mi):      # short-axis follows the edit
+                self._cpr_edit_rebuild()
+        elif chosen is add_pt:
             self._add_point(which, mi, sx, sy)
             _mr_changed = True
             if self._cpr_is_src(which, mi):      # short-axis → the new point
@@ -16337,6 +16370,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             }
             self._center_angle_target = None
         self._redraw_meas(which)
+
+    def _nearest_vertex(self, which, mi, sx, sy):
+        """Index of the measure's vertex nearest the screen point (sx, sy)
+        — compared in the pane's world coords, like _add_point — or None."""
+        try:
+            pts = self._measures[which][mi].get("pts") or []
+            if not pts:
+                return None
+            wx, wy = self._disp_to_world(which, sx, sy)
+            d = [(float(p[0]) - wx) ** 2 + (float(p[1]) - wy) ** 2
+                 for p in pts]
+            return int(min(range(len(d)), key=d.__getitem__))
+        except Exception:                                # noqa: BLE001
+            return None
 
     def _add_point(self, which, mi, sx, sy):
         m = self._measures[which][mi]
@@ -22137,11 +22184,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _update_active_frames(self, flash: bool = False):
         """Red border around the active CT pane (transparent on the
         other, same width so the layout doesn't shift)."""
+        # Measuring with a type chosen (view tools need Alt+drag): the active
+        # frame is ORANGE and twice as thick (user 2026-11-25). The frames
+        # always take 6 px (border + padding), so the images never shift.
+        alt = bool(getattr(self, "_meas_on", False)
+                   and getattr(self, "_meas_type", None))
         for key, f in self._frames.items():
-            colr = "#ff2020" if key == self._active_pane else "transparent"
-            if flash and key == self._active_pane:
+            act = key == self._active_pane
+            colr = ("#ff8c00" if alt else "#ff2020") if act else "transparent"
+            if flash and act:
                 colr = "#ffe000"
-            ss = "QFrame#ctpane { border: 3px solid %s; }" % colr
+            bw = 6 if (alt and act) else 3
+            ss = ("QFrame#ctpane { border: %dpx solid %s; padding: %dpx; }"
+                  % (bw, colr, 6 - bw))
             if f.styleSheet() != ss:           # a re-style per click costs a repolish
                 f.setStyleSheet(ss)
 

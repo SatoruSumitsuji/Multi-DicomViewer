@@ -3695,6 +3695,21 @@ class CPRMixin:
         if path:
             shell._open_coronary_tree_file(path, to_territory=False)
 
+    def _lv_load_full_file(self) -> None:
+        """LV: Load (right of MV-AoV+Apex, user 2026-11-25) — pick a saved
+        .FullLv.json and open it like a drop (the LV analysis restored as an
+        editable LV state; with a docked tree → the Territory review)."""
+        from PyQt6.QtWidgets import QFileDialog
+        shell = self.window()
+        if shell is None or not hasattr(shell, "_open_full_lv_files"):
+            return
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("FullLv を読込"), d,
+            "Full LV (*.FullLv.json);;JSON (*.json)")
+        if path:
+            shell._open_full_lv_files([path])
+
     def _cpr_vr_group_sync(self) -> None:
         """Visibility / texts of the VR support tools (Open VR / 回転連動)."""
         ws = getattr(self, "_cpr_vr_group", None)
