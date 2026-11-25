@@ -3861,6 +3861,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "Auto-Track で近位へ順番に延長し、既存の CPR 線（分岐部）に着いたら"
             "接続します。到達した線は FinTrace ◯、途中で止まった線は × になり、"
             "次の枝へ進みます。先に LM / LAD / LCX / RCA を描いておいてください"))
+        self._cpr_batch_btn.setStyleSheet(self._BTN_DIS)   # grey when off
         self._cpr_batch_btn.clicked.connect(self._coro_batch_extend)
         row.addWidget(self._cpr_batch_btn)
         # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see

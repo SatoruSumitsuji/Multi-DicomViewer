@@ -717,11 +717,28 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_out.setMaximumHeight(150)
         tv.addWidget(self._terr_out)
         split.addWidget(terr)
-        split.setSizes([320, 260])
 
+        # The hint / result text (一括描出 lists every line): in the splitter
+        # too, scrollable, so the dividers can be dragged right down (a long
+        # result no longer fixes the list's height — user 2026-11-25).
+        from PyQt6.QtWidgets import QScrollArea
         self._hint = QLabel("")
         self._hint.setStyleSheet("color:#888;")
-        outer.addWidget(self._hint)
+        self._hint.setWordWrap(True)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignTop
+                                | Qt.AlignmentFlag.AlignLeft)
+        self._hint.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._hint_area = QScrollArea()
+        self._hint_area.setWidget(self._hint)
+        self._hint_area.setWidgetResizable(True)
+        self._hint_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._hint_area.setMinimumHeight(0)
+        split.addWidget(self._hint_area)
+        for i in range(split.count()):
+            split.setCollapsible(i, True)
+        split.setSizes([320, 260, 60])
+        self._split = split
         self._refresh_hint()
 
         # Push the on-image overlay whenever the tree, selection or a vessel's

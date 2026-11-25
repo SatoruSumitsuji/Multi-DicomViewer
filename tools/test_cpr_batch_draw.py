@@ -237,6 +237,24 @@ check("a loop in the tree: walking it ends (no endless loop)",
 tree.vessels["d2"].parent = None
 tree.vessels["d1"].parent = "lad"
 
+# ---- a long result never fixes the list height: the dividers go down -----
+w._hint.setText("\n".join(f"◯ line {i}" for i in range(60)))
+w.resize(420, 700)
+w.show()
+app.processEvents()
+sp = w._split
+tot = sum(sp.sizes())
+sp.setSizes([tot, 0, 0])
+app.processEvents()
+check("the list can be dragged down to the bottom (result text scrolls)",
+      sp.indexOf(w._hint_area) == 2 and sp.sizes()[0] >= tot - 4
+      and w._hint.wordWrap(), (sp.sizes(), tot))
+sp.setSizes([tot // 3, tot // 3, tot - 2 * (tot // 3)])
+app.processEvents()
+check("… and the result pane opened again shows the text (scrollable)",
+      sp.sizes()[2] > 50 and w._hint_area.widgetResizable())
+w.hide()
+
 # ---- the button between Draw and Auto, on both viewers ---------------------
 for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (ROOT / "multi_dicomviewer" / "viewers" / f).read_text(
@@ -248,8 +266,9 @@ for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           0 < i_d < i_b < i_a and 'FitButton(t("一括描出"))' in src)
     i_s = src.find("def _coronary_sync_ui")
     body = src[i_s:src.find("\n    def ", i_s + 10)]
-    check(f"{f}: 一括描出 greyed out while drawing",
-          "self._cpr_batch_btn.setEnabled(not pend)" in body)
+    check(f"{f}: 一括描出 greyed out while drawing (and LOOKS grey)",
+          "self._cpr_batch_btn.setEnabled(not pend)" in body
+          and "self._cpr_batch_btn.setStyleSheet(self._BTN_DIS)" in src)
 mw = (ROOT / "multi_dicomviewer" / "ui" / "main_window.py").read_text(
     encoding="utf-8")
 check("shell: coronary_batch_extend runs it under the stop button",
