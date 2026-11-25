@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Right-click on the distal edit point's short-axis (user 2026-11-25):
-the menu offers 「Auto-Track 再開」, which resumes Auto-Track from the point
+the menu offers 「Auto-Track 開始」, which resumes Auto-Track from the point
 AS IT IS — the right-click no longer moves it (its position is adjusted
 with a left-click beforehand). The marker stays put while the menu is open.
 
@@ -100,8 +100,8 @@ def menu_cancel(self, *a, **k):
 
 QMenu.exec = menu_cancel
 v._cpr_context_menu(csx, csy)
-check("menu offers 「Auto-Track 再開」 (no 「ここを中心に」)",
-      t("Auto-Track 再開") in seen.get("texts", [])
+check("menu offers 「Auto-Track 開始」 (no 「ここを中心に」)",
+      t("Auto-Track 開始") in seen.get("texts", [])
       and not any("ここを中心" in x for x in seen.get("texts", [])),
       seen.get("texts"))
 check("the right-click does not move the marker",
@@ -116,12 +116,12 @@ v._cpr_autotrack = lambda which, mi_, guided=False: called.update(
 
 def menu_pick(self, *a, **k):
     return next(x for x in self.actions()
-                if x.text() == t("Auto-Track 再開"))
+                if x.text() == t("Auto-Track 開始"))
 
 
 QMenu.exec = menu_pick
 v._cpr_context_menu(csx, csy)
-check("「Auto-Track 再開」 resumes (guided) from the point as it is",
+check("「Auto-Track 開始」 resumes (guided) from the point as it is",
       called.get("guided") is True and called.get("mi") == mi
       and np.allclose(called.get("end"), orig), called)
 

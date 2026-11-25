@@ -2675,7 +2675,7 @@ class CPRMixin:
                 # Auto-Track goes on
                 self._meas_record(which, before_probe)
                 self._cpr_autotrack_hint(t(
-                    "左ペインで内腔の中心を左クリックで調整 → 右クリック「Auto-Track 再開」"))
+                    "左ペインで内腔の中心を左クリックで調整 → 右クリック「Auto-Track 開始」"))
             else:
                 self._cpr_autotrack_probe_end(which, mi, m, keep)
         return out
@@ -2713,7 +2713,7 @@ class CPRMixin:
 
     def _cpr_autotrack_center_ok(self) -> bool:
         """The short-axis sits on the line's DISTAL edit point and Auto-Track
-        is available → 「Auto-Track 再開」 in the left pane menu."""
+        is available → 「Auto-Track 開始」 in the left pane menu."""
         c = self._cpr
         if c is None or getattr(self, "_vol", None) is None:
             return False
@@ -2726,7 +2726,7 @@ class CPRMixin:
         return k is not None and k == len(m["pts3d"]) - 1
 
     def _cpr_autotrack_resume(self) -> dict | None:
-        """Right-click ▸ 「Auto-Track 再開」: Auto-Track goes on from the
+        """Right-click ▸ 「Auto-Track 開始」: Auto-Track goes on from the
         line's distal edit point where it is now (set beforehand with a
         left-click) — the right-click no longer moves it (user 2026-11-25)."""
         c = self._cpr

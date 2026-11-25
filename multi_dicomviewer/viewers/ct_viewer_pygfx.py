@@ -20841,7 +20841,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # only; its position is adjusted with a left-click beforehand).
         a_at = None
         if self._cpr_autotrack_center_ok():
-            a_at = menu.addAction(t("Auto-Track 再開"))
+            a_at = menu.addAction(t("Auto-Track 開始"))
             menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an

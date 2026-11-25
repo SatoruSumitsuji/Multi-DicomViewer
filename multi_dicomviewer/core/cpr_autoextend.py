@@ -931,7 +931,7 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
         return ExtendResult(None, [], "contrast", log)
     T = _Tracer(V, prm, lumen, bg, cancel, progress, log, on_step)
     # guided = the last point was just set by the user (a fork choice /
-    # 「Auto-Track 再開」): its first mm follow that lumen only
+    # 「Auto-Track 開始」): its first mm follow that lumen only
     T.guided = bool(guided)
     # the given line counts as traced (nothing runs back into it), except
     # its last 3 mm the trace starts from

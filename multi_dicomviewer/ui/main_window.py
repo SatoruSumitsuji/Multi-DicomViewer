@@ -3672,7 +3672,7 @@ class MainWindow(QMainWindow):
         if u and hasattr(w, "_use_uid"):
             w._use_uid(u)
         try:
-            w._bundle()["terr_calc"] = True  # Calc pressed: compute from now on
+            w._bundle()["terr_calc"] = True  # Calc pressed: compute ONCE (next)
         except Exception:                                # noqa: BLE001
             pass
         try:
@@ -3682,6 +3682,11 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             return False
+        finally:
+            try:
+                w._bundle().pop("terr_calc", None)   # never left armed
+            except Exception:                            # noqa: BLE001
+                pass
         w._full_lv_path = src                # "" = in-session (no file)
         try:
             w._bundle()["terr_path"] = ""    # a fresh Calc: not that file any more

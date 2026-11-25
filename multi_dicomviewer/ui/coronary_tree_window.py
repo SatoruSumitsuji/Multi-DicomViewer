@@ -1405,6 +1405,16 @@ class CoronaryTreeWindow(SnapDock):
                      u=len(res["unconnected"]))
         self._hint.setText(msg)
 
+    def _emit_renamed(self) -> None:
+        """treeChanged for a NAME-only change (vessel name / FixName / file
+        rename): the Territory result is kept (user 2026-11-25 — a name does
+        not change the territory, so no blank and no recompute)."""
+        self._rename_only = True
+        try:
+            self.treeChanged.emit()
+        finally:
+            self._rename_only = False
+
     def selected_vid(self) -> str | None:
         it = self._tree_w.currentItem()
         return None if it is None else it.data(0, _UID_ROLE)
@@ -1416,7 +1426,7 @@ class CoronaryTreeWindow(SnapDock):
         if v is not None and name and name.strip():
             v.name = name.strip()
             self._populate()
-            self.treeChanged.emit()
+            self._emit_renamed()
 
     # ----------------------------------------------------------- display
     # --- configurable colours (Settings ▸ Coronary Tree / Territory) ---------
@@ -2376,20 +2386,18 @@ class CoronaryTreeWindow(SnapDock):
         FullLv drop). Coalesce to the in-flight compute instead.
 
         The Territory is computed only once the user asked for it (user
-        2026-11-19): 「Territory: Calc」 or a loaded .territory.json (*calc*
-        True) arms this CT's bundle; until then a tree edit (setting the Root
-        while building the tree) or a FullLv load leaves the result blank.
-        Once armed, tree edits keep re-assigning it as before; emptying the
-        tree disarms it again."""
-        b = self._bundle()
-        if calc:
-            b["terr_calc"] = True
-        elif not self._tree.vessels:
-            b["terr_calc"] = False
-        if not b.get("terr_calc"):
-            self._territory_blank()
-            return
+        2026-11-19): 「Territory: Calc」 (main_window arms the bundle's
+        one-shot ``terr_calc``) or a loaded .territory.json (*calc* True).
+        Any tree edit afterwards does NOT recompute (user 2026-11-25: every
+        edit re-ran the slow compute) — it blanks the result (「—」) until
+        Calc is pressed again."""
         if getattr(self, "_computing_territory", False):
+            return
+        if getattr(self, "_rename_only", False) and not calc:
+            return                       # a name change keeps the result
+        b = self._bundle()
+        if not (calc or b.pop("terr_calc", False)):
+            self._territory_blank()
             return
         self._computing_territory = True
         try:
@@ -2409,6 +2417,7 @@ class CoronaryTreeWindow(SnapDock):
         if had:
             try:
                 self._populate()
+                self._refresh_targets_table()
                 self._push_territory()
             except Exception:                            # noqa: BLE001
                 pass
@@ -2455,11 +2464,14 @@ class CoronaryTreeWindow(SnapDock):
 
     def _myo_text(self, vid: str) -> str:
         """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the
-        ostium, as 'ml mL / pct%'. Empty when no engine. A parent includes its
-        children, so values nest and the sum can exceed 100% (expected)."""
+        ostium, as 'ml mL / pct%'. 「—」 when not computed (no Calc yet, or
+        the tree was edited since). A parent includes its children, so values
+        nest and the sum can exceed 100% (expected)."""
         eng = self._territory
-        if eng is None or vid not in self._tree.vessels:
+        if vid not in self._tree.vessels:
             return ""
+        if eng is None:
+            return "—" if self._full_lv_data is not None else ""
         try:
             _mask, ml = eng.territory(vid, self._tree.proximal_idx(vid))
         except Exception:                                # noqa: BLE001
@@ -2503,8 +2515,10 @@ class CoronaryTreeWindow(SnapDock):
             pos = (100.0 * int(tg["idx"]) / (n - 1)) if n > 1 else 0.0
             # Col 0 = checkbox only (empty text); col 1 = centred BLACK Target
             # number; then 血管 / 位置 / 心筋% / 灌流域mL.
+            calc = self._territory is not None   # 「—」 until Calc
             it = QTreeWidgetItem(["", str(i), label, f"{pos:.0f}%",
-                                  f"{tg['pct']:.1f}%", f"{tg['ml']:.1f}"])
+                                  f"{tg['pct']:.1f}%" if calc else "—",
+                                  f"{tg['ml']:.1f}" if calc else "—"])
             it.setData(0, _UID_ROLE, i - 1)     # row → index into _targets
             it.setTextAlignment(1, Qt.AlignmentFlag.AlignHCenter
                                 | Qt.AlignmentFlag.AlignVCenter)
@@ -2711,7 +2725,12 @@ class CoronaryTreeWindow(SnapDock):
         each, for the VR overlay. Empty when nothing is computed."""
         eng = self._territory
         if eng is None or self._myo_ml is None:
-            return ""
+            # not computed (no Calc yet / edited since): 「—」 like the panel
+            if self._full_lv_data is None or not self._tree.vessels:
+                return ""
+            roles = [self._tree.vessels[vid].role for vid in self._tree.roots()]
+            return "\n".join(["Myocardium —"] + [
+                f"{r} —" for r in ("LM", "LAD", "LCX", "RCA") if r in roles])
         total = eng.myocardium_ml
         by_role: dict = {}
         for vid in self._tree.roots():
@@ -2735,6 +2754,9 @@ class CoronaryTreeWindow(SnapDock):
         lines = []
         for i, tg in enumerate(self._targets, 1):
             if tg.get("hidden"):
+                continue
+            if self._territory is None:          # 「—」 until Calc
+                lines.append(f"Target-{i} —")
                 continue
             lines.append(f"Target-{i} {tg.get('pct', 0.0):.1f}% / "
                          f"{tg.get('ml', 0.0):.1f}mL")
@@ -3129,7 +3151,7 @@ class CoronaryTreeWindow(SnapDock):
 
         def _apply():
             self._populate()
-            self.treeChanged.emit()
+            self._emit_renamed()
             # The file follows at once (<name> + FixName), no extra step.
             self._batch_rename(only={vid}, ask=False)
         QTimer.singleShot(0, _apply)
@@ -4370,7 +4392,7 @@ class CoronaryTreeWindow(SnapDock):
         if tree_file and done:
             self._write_to(tree_file)
         self._populate()
-        self.treeChanged.emit()
+        self._emit_renamed()
         self._push_overlay()
         self._hint.setText(t("{n} 本のファイル名を更新しました。", n=done))
         if problems and done:
