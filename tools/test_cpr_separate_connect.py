@@ -91,9 +91,15 @@ check("distal part: next serial name (02) + its 02.cpr.json",
       nv is not None and nv.name == "02"
       and os.path.isfile(os.path.join(D, "02.cpr.json"))
       and b["paths"].get(new) == os.path.join(D, "02.cpr.json"))
+G = w.SPLIT_GAP_MM
 check("proximal part keeps LAD (root), ends at the cut",
-      lad.role == "LAD" and abs(lad.points[-1][0] - 20.0) < 0.6
-      and abs(nv.points[0][0] - 20.0) < 0.6 and abs(nv.points[-1][0] - 40) < 0.6)
+      lad.role == "LAD" and abs(lad.points[-1][0] - (20.0 - G / 2)) < 0.3
+      and abs(nv.points[0][0] - (20.0 + G / 2)) < 0.3
+      and abs(nv.points[-1][0] - 40) < 0.6,
+      (lad.points[-1][0], nv.points[0][0]))
+check("a visible gap (1-2 mm) between the two lines",
+      1.0 <= nv.points[0][0] - lad.points[-1][0] <= 2.0,
+      nv.points[0][0] - lad.points[-1][0])
 check("distal part hangs on the proximal end",
       nv.parent == "lad" and nv.junction == lad.n - 1)
 check("the side branch beyond the cut moves to the distal part",
@@ -103,7 +109,8 @@ with open(p_lad, encoding="utf-8") as f:
 with open(os.path.join(D, "02.cpr.json"), encoding="utf-8") as f:
     fd = json.load(f)
 check("files: proximal rewritten, distal written (no stale manual / idx)",
-      abs(fl["ctrl"][-1][0] - 20.0) < 0.6 and abs(fd["ctrl"][0][0] - 20.0) < 0.6
+      abs(fl["ctrl"][-1][0] - (20.0 - G / 2)) < 0.3
+      and abs(fd["ctrl"][0][0] - (20.0 + G / 2)) < 0.3
       and "ctrl_manual" not in fl and fd["state"]["idx"] == 0
       and fd["format"] == "MDV-CPR")
 check("separate at the very end is refused",

@@ -3360,6 +3360,9 @@ class CoronaryTreeWindow(SnapDock):
         nd["state"] = st0
         return nd
 
+    #: 「ここで separate」: the gap left between the two lines (mm)
+    SPLIT_GAP_MM = 1.5
+
     def split_vessel(self, vid: str, idx: int, folder: str = "") -> str:
         """「ここで separate」: cut vessel *vid* at its sample *idx* into two
         lines. The proximal part keeps the vessel (name / role / parent /
@@ -3381,17 +3384,31 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("線の端では分離できません。もう少し内側を右クリック"
                          "してください。"))
             return ""
-        P = np.asarray(v.points[idx], float)
         ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
                           else v.points, float)
-        # each edit point's place along the line (its nearest sample)
-        pos = [int(np.argmin(np.linalg.norm(v.points - c, axis=1)))
+        # A small GAP at the cut (user 2026-11-25: the two lines looked like
+        # one): the proximal part ends half of it before, the distal part
+        # starts half of it after (along the line).
+        pts_ = np.asarray(v.points, float)
+        arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts_, axis=0),
+                                                  axis=1))]
+        s0 = float(arc[idx])
+        half = 0.5 * self.SPLIT_GAP_MM
+        if s0 - half <= arc[0] + 0.5 or s0 + half >= arc[-1] - 0.5:
+            half = 0.0                            # no room: a plain cut
+
+        def at(sv):
+            return np.array([np.interp(sv, arc, pts_[:, i]) for i in range(3)])
+        Pp, Pd = at(s0 - half), at(s0 + half)
+        # each edit point's place along the line (arc length of its nearest
+        # sample)
+        pos = [float(arc[int(np.argmin(np.linalg.norm(pts_ - c, axis=1)))])
                for c in ctrl]
         near = 0.5                                # mm: an edit point AT the cut
-        prox = [c for c, s in zip(ctrl, pos) if s < idx
-                and np.linalg.norm(c - P) > near] + [P]
-        dist = [P] + [c for c, s in zip(ctrl, pos) if s > idx
-                      and np.linalg.norm(c - P) > near]
+        prox = [c for c, sp in zip(ctrl, pos) if sp < s0 - half
+                and np.linalg.norm(c - Pp) > near] + [Pp]
+        dist = [Pd] + [c for c, sp in zip(ctrl, pos) if sp > s0 + half
+                       and np.linalg.norm(c - Pd) > near]
         if len(prox) < 2 or len(dist) < 2:
             self._warn(t("分離後の線が短すぎます。もう少し内側を右クリック"
                          "してください。"))

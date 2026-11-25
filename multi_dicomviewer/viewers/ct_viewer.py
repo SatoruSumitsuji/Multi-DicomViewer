@@ -4196,6 +4196,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
         # and the Blood region's basal bound. Saved to their own MVAoVLv.json /
         # AoVLv.json (single source, one per 3DCT phase). ----
+        # Load FIRST (user 2026-11-25): a saved .FullLv.json, like dropping it
+        self._lv_full_load_btn = FitButton(t("Load"))
+        self._lv_full_load_btn.setHelpToolTip(t(
+            "保存した .FullLv.json を読み込み、LV 解析（MV-AoV / Apex / Epi / "
+            "Blood-Endo）を一括で表示します。"))
+        self._lv_full_load_btn.setStyleSheet(self._BTN_DIS)
+        self._lv_full_load_btn.clicked.connect(
+            lambda _=False: self._lv_load_full_file())
+        row1.addWidget(self._lv_full_load_btn)
         self._lv_mv_btn = FitButton(t("MV-AoV+Apex"))
         self._lv_mv_btn.setHelpToolTip(t(
             "MV 面と心尖部（Epi / Blood-Endo 共通）を設定します。Auto で MV 中心と"
@@ -4207,15 +4216,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_mv_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_mvapex_rclick())
         row1.addWidget(self._lv_mv_btn)
-        # Load (user 2026-11-25): a saved .FullLv.json, like dropping it
-        self._lv_full_load_btn = FitButton(t("Load"))
-        self._lv_full_load_btn.setHelpToolTip(t(
-            "保存した .FullLv.json を読み込み、LV 解析（MV-AoV / Apex / Epi / "
-            "Blood-Endo）を一括で表示します。"))
-        self._lv_full_load_btn.setStyleSheet(self._BTN_DIS)
-        self._lv_full_load_btn.clicked.connect(
-            lambda _=False: self._lv_load_full_file())
-        row1.addWidget(self._lv_full_load_btn)
         self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
             t("Set the COMMON AoV plane (shared by Epi / Blood-Endo): opens the "
@@ -4843,8 +4843,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                     self._coro_file_label]
         # NOTE: _lv_endo_btn is a hidden internal flag (merged into Blood/Endo) —
         # excluded so it is never force-shown.
-        self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
-                              self._lv_full_load_btn,
+        self._lv_selectors = [self._lv_cap, self._lv_full_load_btn,
+                              self._lv_mv_btn,
                               self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]

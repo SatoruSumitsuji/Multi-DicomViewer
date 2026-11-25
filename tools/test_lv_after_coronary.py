@@ -82,11 +82,24 @@ v._lv_update_submode_ui()
 check("Simple View with the tree kept: MV-AoV+Apex usable",
       v._lv_mv_btn.isEnabled() and v._lv_full_load_btn.isEnabled())
 app.processEvents()
-gm = v._lv_mv_btn.mapTo(v, v._lv_mv_btn.rect().topRight())
-gl = v._lv_full_load_btn.mapTo(v, v._lv_full_load_btn.rect().topLeft())
-check("Load sits right of MV-AoV+Apex (next to it)",
+gm = v._lv_full_load_btn.mapTo(v, v._lv_full_load_btn.rect().topRight())
+gl = v._lv_mv_btn.mapTo(v, v._lv_mv_btn.rect().topLeft())
+check("Load sits LEFT of MV-AoV+Apex (next to it)",
       v._lv_full_load_btn.isVisible() and 0 <= gl.x() - gm.x() <= 12
       and abs(gl.y() - gm.y()) <= 4, (gm, gl))
+seq = [v._lv_full_load_btn, v._lv_mv_btn, v._lv_epi_btn, v._lvv_start_btn,
+       v._full_lv_btn]
+ix = [x.mapTo(v, x.rect().topLeft()).x() for x in seq]
+check("LV row order: Load, MV-AoV+Apex, 心外膜, Blood/Endo, FullLV",
+      all(x.isVisible() for x in seq) and ix == sorted(ix)
+      and len(set(ix)) == 5, ix)
+g = v._ct_terr_button()
+tl = g.layout()
+names = [tl.itemAt(i).widget().text() for i in range(tl.count())
+         if tl.itemAt(i).widget() is not None]
+check("Territory order: Load, Calc, Save",
+      [n for n in names if n in ("Load", "Calc", "Save")]
+      == ["Load", "Calc", "Save"], names)
 opened = []
 import PyQt6.QtWidgets as _QW  # noqa: E402
 _QW.QFileDialog.getOpenFileName = staticmethod(

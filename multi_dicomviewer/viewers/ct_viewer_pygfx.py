@@ -13414,6 +13414,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         _blood_grp = self._build_lvv_bar()
         # ---- Common valve planes (MV / AoV) + apex: set once, shared by every
         # sub-mode. MV/AoV open a guided edit step; right-click hides/shows.
+        # Load FIRST (user 2026-11-25): a saved .FullLv.json, like dropping it
+        self._lv_full_load_btn = FitButton(t("Load"))
+        self._lv_full_load_btn.setHelpToolTip(t(
+            "保存した .FullLv.json を読み込み、LV 解析（MV-AoV / Apex / Epi / "
+            "Blood-Endo）を一括で表示します。"))
+        self._lv_full_load_btn.setStyleSheet(self._BTN_DIS)
+        self._lv_full_load_btn.clicked.connect(
+            lambda _=False: self._lv_load_full_file())
+        row1.addWidget(self._lv_full_load_btn)
         self._lv_mv_btn = FitButton(t("MV-AoV+Apex"))
         self._lv_mv_btn.setHelpToolTip(t(
             "MV 面と心尖部（Epi / Blood-Endo 共通）を設定します。Auto で MV 中心と"
@@ -13431,15 +13440,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             lambda _p: self._after_mouse_release(
                 self._lv_mvapex_rclick))
         row1.addWidget(self._lv_mv_btn)
-        # Load (user 2026-11-25): a saved .FullLv.json, like dropping it
-        self._lv_full_load_btn = FitButton(t("Load"))
-        self._lv_full_load_btn.setHelpToolTip(t(
-            "保存した .FullLv.json を読み込み、LV 解析（MV-AoV / Apex / Epi / "
-            "Blood-Endo）を一括で表示します。"))
-        self._lv_full_load_btn.setStyleSheet(self._BTN_DIS)
-        self._lv_full_load_btn.clicked.connect(
-            lambda _=False: self._lv_load_full_file())
-        row1.addWidget(self._lv_full_load_btn)
         self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
             t("Set the COMMON AoV plane: opens the AoV step (Draw an Ellipse → "
@@ -13781,8 +13781,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_group_widgets = [self._coro_cap, self._coro_load_btn,
                                     self._coronary_mpr_btn,
                                     self._coro_file_label]
-        self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
-                              self._lv_full_load_btn,
+        self._lv_selectors = [self._lv_cap, self._lv_full_load_btn,
+                              self._lv_mv_btn,
                               self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]
