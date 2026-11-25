@@ -409,6 +409,7 @@ class TW:
     _rename_base = W._rename_base
     _rename_plan_raw = W._rename_plan_raw
     _batch_rename = W._batch_rename
+    _emit_renamed = W._emit_renamed
     _rename = W._rename
     _rename_commit = W._rename_commit
     _retarget_viewer_path = W._retarget_viewer_path
