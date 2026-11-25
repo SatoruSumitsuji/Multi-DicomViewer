@@ -344,6 +344,35 @@ class CoronaryTree:
                 "code_to_vid": code_to_vid}
 
     # -------------------------------------------------- distal territory
+    def runs_reversed(self, vid: str) -> bool:
+        """True when a 「枝」 line's samples run DISTAL→PROXIMAL (user
+        2026-11-25: a branch drawn / batch-traced from its distal end toward
+        the tree is stored that way, so its territory came out on the wrong
+        side of the target). LM / LAD / LCX / RCA always run proximal→distal.
+        A branch on a parent: its proximal end is the end at the junction
+        point on the parent; an unattached branch: reversed (drawn from the
+        distal end)."""
+        v = self.vessels.get(vid)
+        if v is None or v.n < 2 or normalize_role(v.role) in ROOT_ROLES:
+            return False
+        p = self.vessels.get(v.parent) if v.parent else None
+        if p is None or p.n < 1:
+            return True
+        j = int(v.junction) if v.junction is not None else int(np.argmin(
+            np.linalg.norm(p.points - v.points[0], axis=1)))
+        J = np.asarray(p.points[max(0, min(j, p.n - 1))], float)
+        d0 = float(np.linalg.norm(np.asarray(v.points[0], float) - J))
+        d1 = float(np.linalg.norm(np.asarray(v.points[-1], float) - J))
+        return d1 < d0
+
+    def proximal_idx(self, vid: str) -> int:
+        """The sample index of a vessel's PROXIMAL end (its whole territory
+        starts here): 0, or the last index for a reversed 「枝」."""
+        v = self.vessels.get(vid)
+        if v is None:
+            return 0
+        return v.n - 1 if self.runs_reversed(vid) else 0
+
     def distal_set(self, vid: str, idx: int) -> tuple[str, int, set[str]]:
         """For a chosen point (vessel ``vid``, sample ``idx``) return
         ``(vid, start_idx, full)``: on ``vid`` samples ≥ ``start_idx`` are
@@ -351,12 +380,15 @@ class CoronaryTree:
         sub-branch). A voxel is in the territory iff its assigned sample is on
         ``vid`` at index ≥ start_idx, or on a vessel in ``full``."""
         start = int(idx)
+        rev = self.runs_reversed(vid)         # 「枝」 stored distal→proximal
         # A child is fully distal iff it branches off THIS vessel at or after the
-        # chosen point; every vessel below such a child is fully distal too.
+        # chosen point (before it in index for a reversed 「枝」); every vessel
+        # below such a child is fully distal too.
         full: set[str] = set()
         queue = [c for c in self.children(vid)
                  if self.vessels[c].junction is not None
-                 and self.vessels[c].junction >= start]
+                 and (self.vessels[c].junction <= start if rev
+                      else self.vessels[c].junction >= start)]
         while queue:
             f = queue.pop()
             if f in full:
@@ -377,7 +409,9 @@ class CoronaryTree:
         # chosen vessel, distal portion
         if vid in vid_to_code:
             cc = vid_to_code[vid]
-            out |= (code == cc) & (a_idx >= start)
+            side = (a_idx <= start) if self.runs_reversed(vid) \
+                else (a_idx >= start)
+            out |= (code == cc) & side
         # fully-distal downstream sub-branches
         full_codes = [vid_to_code[v] for v in full if v in vid_to_code]
         if full_codes:
@@ -597,7 +631,7 @@ def format_territory_report(tree: CoronaryTree, lvf,
     L.append("Per-root territory (whole subtree, from ostium):")
     for vid in roots:
         v = tree.vessels[vid]
-        _mask, ml = eng.territory(vid, 0)
+        _mask, ml = eng.territory(vid, tree.proximal_idx(vid))
         by_role[v.role] = by_role.get(v.role, 0.0) + ml
         L.append(f"  {v.role:<4} {short_vessel_name(v.name):<16} : "
                  f"{ml:8.1f} mL  {pct(ml)}")

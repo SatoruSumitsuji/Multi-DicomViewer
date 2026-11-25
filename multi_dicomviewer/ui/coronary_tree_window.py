@@ -1459,7 +1459,9 @@ class CoronaryTreeWindow(SnapDock):
         # Junction position along the parent as BOTH an arc-length fraction (0% =
         # proximal/ostium, 100% = distal) and mm from the parent's proximal end;
         # points are uniform arc-length samples, so idx maps linearly to length.
-        frac = v.junction / (p.n - 1)
+        jj = (p.n - 1 - v.junction) if self._tree.runs_reversed(v.parent) \
+            else v.junction                       # from the parent's proximal end
+        frac = jj / (p.n - 1)
         total_mm = float(np.linalg.norm(np.diff(p.points, axis=0), axis=1).sum())
         return f"@{pname} {round(100 * frac)}% / {frac * total_mm:.0f}mm"
 
@@ -2436,7 +2438,7 @@ class CoronaryTreeWindow(SnapDock):
         if eng is None or vid not in self._tree.vessels:
             return ""
         try:
-            _mask, ml = eng.territory(vid, 0)
+            _mask, ml = eng.territory(vid, self._tree.proximal_idx(vid))
         except Exception:                                # noqa: BLE001
             return ""
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
@@ -2691,7 +2693,7 @@ class CoronaryTreeWindow(SnapDock):
         by_role: dict = {}
         for vid in self._tree.roots():
             v = self._tree.vessels[vid]
-            _m, ml = eng.territory(vid, 0)
+            _m, ml = eng.territory(vid, self._tree.proximal_idx(vid))
             by_role[v.role] = by_role.get(v.role, 0.0) + ml
         lines = [f"Myocardium {self._myo_ml:.1f}mL"]
         for role in ("LM", "LAD", "LCX", "RCA"):
