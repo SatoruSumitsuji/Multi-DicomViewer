@@ -526,8 +526,9 @@ class CoronaryTreeWindow(SnapDock):
             (t("フォルダ更新"),
              t("CPRフォルダと同期：役割・接続は保持したまま、フォルダの .cpr.json で"
                "中心線を更新／フォルダに無い血管を一覧から削除／新しい .cpr.json を"
-               "未接続で追加（元の .cpr.json ファイルは変更しません）"),
-             self._resync_from_folder, False),
+               "未接続で追加（元の .cpr.json ファイルは変更しません）。"
+               "FixName があればファイル名を「血管名 + FixName」に更新します"),
+             self._folder_update, False),
             (t("接続"), t("読み込んだ枝を最近接端点で接続 (5mm以内)"),
              self._connect, False),
         ])
@@ -961,6 +962,16 @@ class CoronaryTreeWindow(SnapDock):
         self._hint.setText(t("「{n}」を上書き保存しました。", n=v.name))
         return True
 
+    def _folder_update(self) -> None:
+        """フォルダ更新 (button): sync with the CPR folder, then — when a FixName
+        is set — rename the files to <vessel name> + FixName (preview first;
+        user 2026-11-25: 「@007」 + フォルダ更新 left the files unrenamed, the
+        ファイル名更新 button having been folded into this one)."""
+        if not self._resync_from_folder():
+            return                               # no folder / cancelled
+        if self._tree_fix() and self._rename_plan_raw():
+            self._batch_rename(ask=True)
+
     def _resync_from_folder(self, folder: str | None = None):
         """CPRフォルダで更新 — reconcile the ACTIVE CT's tree with a folder of
         per-vessel ``<name>.cpr.json`` files, KEEPING the existing roles/connections
@@ -1047,6 +1058,7 @@ class CoronaryTreeWindow(SnapDock):
                     to_remove.append(vid)
                 continue
             matched.add(safe)
+            b["paths"][vid] = fd["path"]     # its file (Open Folder / rename)
             self._apply_cpr_meta(v, fd.get("data"))      # AutoTrace / names
             try:
                 ctrl_arr = np.asarray(fd["ctrl"], float)
@@ -1063,7 +1075,7 @@ class CoronaryTreeWindow(SnapDock):
         if not (to_update or to_remove or to_add):
             self._populate()                     # AutoTrace / names may differ
             self._hint.setText(t("フォルダと一致しています（更新はありません）。"))
-            return
+            return True
         # 4) confirm — the removals are the only destructive part, so name them.
         rem_names = [tree.vessels[v].name for v in to_remove]
         msg = t("CPRフォルダで更新しますか?\n追加 {a} 本 / 更新 {u} 本 / 削除 {d} 本",
@@ -1074,7 +1086,7 @@ class CoronaryTreeWindow(SnapDock):
             msg += "\n" + t("（削除された親の子は未接続に戻ります）")
         if QMessageBox.question(self, t("CPRフォルダで更新"), msg) \
                 != QMessageBox.StandardButton.Yes:
-            return
+            return False
         # 5) apply — all on the active CT's tree/bundle.
         # 5a) updates: keep name/role/parent, swap only the geometry.
         updated_vids = set()
@@ -1147,6 +1159,7 @@ class CoronaryTreeWindow(SnapDock):
         if b.get("territory") is not None and (to_remove or to_update or to_add):
             msg += " " + t("※灌流テリトリーは再計算してください。")
         self._hint.setText(msg)
+        return True
 
     def _toggle_overlay(self):
         """ツリー表示 / ツリー非表示 button: toggle the whole coronary overlay on
@@ -1579,13 +1592,23 @@ class CoronaryTreeWindow(SnapDock):
         cand += [p for k, p in paths.items()
                  if p and k in self._tree.vessels]
         cand += [p for p in paths.values() if p]
-        if b.get("last_path"):
-            cand.append(b["last_path"])
         for p in cand:
             d = os.path.dirname(os.path.abspath(p))
             if os.path.isdir(d):
                 return d
-        return ""
+        # no line file known yet: the CT's Next folder (where Next / Save
+        # write the NN.cpr.json), before the tree file's own folder
+        try:
+            sv = self._source_viewer()
+            nd = sv._cpr_next_dir() if sv is not None \
+                and hasattr(sv, "_cpr_next_dir") else ""
+        except Exception:                                # noqa: BLE001
+            nd = ""
+        if nd and os.path.isdir(nd):
+            return nd
+        lp = b.get("last_path") or ""
+        d = os.path.dirname(os.path.abspath(lp)) if lp else ""
+        return d if d and os.path.isdir(d) else ""
 
     def _open_cpr_folder(self) -> None:
         from PyQt6.QtCore import QUrl
@@ -4448,9 +4471,22 @@ class CoronaryTreeWindow(SnapDock):
             # load (or a drag&drop onto the shell) re-opens the same 3-D CT and
             # labels it clearly even without the CT open. See _corotree_series_block.
             series = self._corotree_series_block()
+            data = self._tree.to_json(series=series)
+            # each line's .cpr.json (relative to the tree file), so a reload
+            # knows where the files are — Open Folder / FixName rename
+            # (user 2026-11-25: Open Folder opened the CT's parent folder)
+            paths = self._bundle().get("paths") or {}
+            base = os.path.dirname(os.path.abspath(path))
+            for d in data.get("vessels", []):
+                cp = paths.get(d.get("vid"), "") or ""
+                if cp and os.path.isfile(cp):
+                    try:
+                        d["cpr_file"] = os.path.relpath(
+                            os.path.abspath(cp), base).replace("\\", "/")
+                    except ValueError:          # another drive → absolute
+                        d["cpr_file"] = os.path.abspath(cp)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._tree.to_json(series=series), f,
-                          ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
             self._last_path = path
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
@@ -4496,13 +4532,20 @@ class CoronaryTreeWindow(SnapDock):
         if not dirs:
             return []
         refreshed = []
+        rec = getattr(self, "_load_cpr_files", None) or {}
+        sub = []                                 # one level of sub-folders
+        for d in dirs:
+            try:
+                sub += [e.path for e in os.scandir(d) if e.is_dir()]
+            except OSError:
+                pass
         for vid, v in self._tree.vessels.items():
             name = (v.name or "").strip()
             if not name:
                 continue
             safe = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
-            cand = ""
-            for d in dirs:
+            cand = rec.get(vid, "") if os.path.isfile(rec.get(vid, "")) else ""
+            for d in ([] if cand else dirs + sub):
                 p = os.path.join(d, safe + ".cpr.json")
                 if os.path.isfile(p):
                     cand = p
@@ -4561,6 +4604,16 @@ class CoronaryTreeWindow(SnapDock):
         uid = ser.get("series_uid", "") or ""
         self._use_uid(uid, ct_dir=ser.get("src_dir", "") or "", series=ser)
         self._tree = CoronaryTree.from_json(data)
+        # each line's recorded .cpr.json (saved with the tree), resolved
+        # against the tree file's folder
+        base = os.path.dirname(os.path.abspath(path))
+        self._load_cpr_files = {}
+        for d in data.get("vessels", []) or []:
+            cf = (d.get("cpr_file") or "") if isinstance(d, dict) else ""
+            if cf:
+                fp = cf if os.path.isabs(cf) else os.path.normpath(
+                    os.path.join(base, cf))
+                self._load_cpr_files[d.get("vid")] = fp
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         self._last_path = path

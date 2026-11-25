@@ -9279,6 +9279,20 @@ class MainWindow(QMainWindow):
         # user stops dragging. (restart() resets the countdown each tick.)
         self._tag_font_timer.start()
 
+    def ct_result_font_set(self, pct: int) -> None:
+        """結果文字サイズ (a CT viewer's slider): every CT viewer in every pane
+        takes the same size (both of its panes), and it is saved."""
+        pct = int(pct)
+        for pane in self._panes:
+            for v in pane.all_viewers():
+                if hasattr(v, "set_result_font_pct"):
+                    v.set_result_font_pct(pct)
+        try:
+            from multi_dicomviewer.core import settings as _st
+            _st.save_ui_state("ct_result_font_pct", pct)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _apply_tag_font_pt(self) -> None:
         """Broadcast the latest DICOM-tag overlay text size to every viewer in
         every pane so the size stays uniform across modalities. Debounced from

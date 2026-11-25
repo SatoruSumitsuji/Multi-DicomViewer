@@ -26,7 +26,8 @@ CoronaryTreeモード. A row-3 readout names the FullLv / corotree (or 計測済
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QSizePolicy, QSlider,
+                             QWidget)
 from PyQt6.QtCore import Qt
 
 from multi_dicomviewer.i18n import t
@@ -74,6 +75,11 @@ _MODE_CSS = (
 )
 
 
+#: 結果文字サイズ slider range (% of the default result-text size)
+RESULT_FONT_PCT_MIN = 50
+RESULT_FONT_PCT_MAX = 150
+
+
 class CTModeBarMixin:
     """Mode buttons + loaded-file readout. Host provides ``_territory_display``,
     ``_bottom_ctx`` and ``window()`` / ``parent()`` (a QWidget)."""
@@ -96,6 +102,77 @@ class CTModeBarMixin:
         # 「Territory計算」 is not a mode: it sits at the right end of the
         # Coronary / VR / LV row (the viewers place it there).
         self._ct_terr_button()
+        # 結果文字サイズ (user 2026-11-25): ONE size for every result text on
+        # BOTH panes — WW/WL, the angle, the pane kind (A | MPR), measure /
+        # LV / Territory results, legends, the hover HU. The DICOM-tag size
+        # stays on the top-row slider.
+        row.addSpacing(16)
+        cap = QLabel(t("結果文字サイズ："))
+        row.addWidget(cap)
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setRange(RESULT_FONT_PCT_MIN, RESULT_FONT_PCT_MAX)
+        sl.setSingleStep(5)
+        sl.setPageStep(10)
+        sl.setFixedWidth(110)
+        sl.setValue(self._result_font_pct_now())
+        sl.setToolTip(t(
+            "結果の文字サイズ（{a}〜{b}%）：WW/WL・角度・計測 / LV / Territory "
+            "の結果などを左右両ペインで一括して変更します。DICOM タグは上の"
+            "スライダーで変更します", a=RESULT_FONT_PCT_MIN,
+            b=RESULT_FONT_PCT_MAX))
+        sl.valueChanged.connect(self._result_font_slider_moved)
+        row.addWidget(sl)
+        self._result_font_slider = sl
+        self._result_font_cap = cap
+        if self._result_font_pct_now() != 100:     # the saved size, once built
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.set_result_font_pct(
+                self._result_font_pct_now()))
+
+    # ---- 結果文字サイズ ------------------------------------------------------
+    def _result_font_pct_now(self) -> int:
+        """The result-text size (% of the default), from the saved setting
+        the first time."""
+        pct = getattr(self, "_result_font_pct", None)
+        if pct is None:
+            try:
+                from multi_dicomviewer.core import settings as _st
+                pct = int(_st.load_ui_state("ct_result_font_pct", 100) or 100)
+            except Exception:                            # noqa: BLE001
+                pct = 100
+            pct = max(RESULT_FONT_PCT_MIN, min(RESULT_FONT_PCT_MAX, pct))
+            self._result_font_pct = pct
+        return int(pct)
+
+    def _rfs(self, size) -> int:
+        """*size* (a default font size, px or pt) at the result-text size."""
+        return max(6, int(round(float(size) * self._result_font_pct_now()
+                                / 100.0)))
+
+    def _result_font_slider_moved(self, pct) -> None:
+        """Slider: every CT viewer in the shell takes the size (both panes,
+        all CT panes) and it is saved; without a shell just this viewer."""
+        shell = self._ct_mode_shell() if hasattr(self, "_ct_mode_shell") \
+            else None
+        if shell is not None and hasattr(shell, "ct_result_font_set"):
+            shell.ct_result_font_set(int(pct))
+        else:
+            self.set_result_font_pct(int(pct))
+
+    def set_result_font_pct(self, pct) -> None:
+        """Public (shell): apply the result-text size (%) to this viewer."""
+        pct = max(RESULT_FONT_PCT_MIN, min(RESULT_FONT_PCT_MAX, int(pct)))
+        self._result_font_pct = pct
+        sl = getattr(self, "_result_font_slider", None)
+        if sl is not None and sl.value() != pct:
+            sl.blockSignals(True)
+            sl.setValue(pct)
+            sl.blockSignals(False)
+        try:
+            self._apply_result_font()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
     # ---- Territory: Blood / 壁厚3D / 壁厚短軸 (the review bar) ---------------
     def _terr_toggle_blood(self) -> None:

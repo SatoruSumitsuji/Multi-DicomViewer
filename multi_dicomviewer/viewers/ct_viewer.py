@@ -1742,6 +1742,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             and getattr(o, "_view_initial", False)
         ):
             o._fit_pane(self._which)
+        # A VR pane's corner summaries (Territory Myocardium / LM / LAD …) are
+        # placed for the pane width: re-fit them to the new size (1x2 …).
+        try:
+            if (getattr(o, "_vr_on", {}) or {}).get(self._which) \
+                    and hasattr(o, "_vr_update_summary"):
+                o._vr_update_summary(self._which)
+        except Exception:                                # noqa: BLE001
+            pass
 
 
 class _LvvWorker(QThread):
@@ -11050,19 +11058,53 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             sl.blockSignals(False)
         vf = _vtk_font_px(pt)
         for key, p in self.pane.items():
-            p.info.SetMaximumFontSize(vf)   # bottom WW/WL & key|kind readouts
-            # Tags + results are fixed-size actors: set their EXACT pixel size
-            # (no auto-fit), then re-wrap to the new 40% budget. Tags are cheap
-            # to rebuild; results re-wrap the stored (unwrapped) lines so we
-            # don't recompute HU stats on every slider tick.
+            # DICOM tags only (the results, WW/WL and pane kind follow the
+            # 結果文字サイズ slider — user 2026-11-25): set the EXACT pixel
+            # size, then re-wrap to the new 40% budget.
             p.tagact.GetTextProperty().SetFontSize(vf)
             for _ha in p.tagact_halo:           # outline tracks the tag size
                 _ha.GetTextProperty().SetFontSize(vf)
-            p.resultact.GetTextProperty().SetFontSize(vf)
             if self._header is not None:
                 self._update_info(key, False)
+            p.render()
+
+    def _apply_result_font(self) -> None:
+        """結果文字サイズ: every result text on BOTH panes at the same scale —
+        WW/WL + pane kind (corner), the angle (+ outline), the result block
+        (measure / LV), the Territory / Target / VR WW-WL readouts, the
+        wall legends, the hover HU, the on-image measure labels and the
+        Compare texts."""
+        base = _vtk_font_px(TAG_FONT_PT_DEFAULT)
+        for key, p in self.pane.items():
+            p.info.SetMaximumFontSize(self._rfs(base))
+            p.resultact.GetTextProperty().SetFontSize(self._rfs(base))
+            for a in [getattr(p, "angle", None)] + list(
+                    getattr(p, "angle_halo", []) or []):
+                if a is not None:
+                    a.GetTextProperty().SetFontSize(self._rfs(18))
+            for a in getattr(p, "lv_wall_legend", []) or []:
+                a.GetTextProperty().SetFontSize(self._rfs(16))
+            hh = getattr(p, "hover_hu", None)
+            if hh is not None:
+                hh.GetTextProperty().SetFontSize(self._rfs(15))
+            tb = getattr(p, "thick_bar", None)
+            if tb is not None:
+                for tp in (tb.GetTitleTextProperty(),
+                           tb.GetLabelTextProperty()):
+                    tp.SetFontSize(self._rfs(18))
+            if self._header is not None:
                 p.resultact.SetInput("\n".join(wrap_lines_to_chars(
-                    self._metric_lines.get(key, []), self._wrap_budget(key))))
+                    self._metric_lines.get(key, []),
+                    self._wrap_budget(key, result=True))))
+            if (getattr(self, "_vr_on", {}) or {}).get(key):
+                self._vr_update_summary(key)     # Territory / Target / WW-WL
+        if self._image is not None:
+            for key in self.pane:
+                try:
+                    self._redraw_meas(key)       # on-image labels, Compare
+                except Exception:                # noqa: BLE001
+                    pass
+        for p in self.pane.values():
             p.render()
 
     def retranslate_ui(self) -> None:
@@ -11705,6 +11747,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         def _add_cmp_text(txt, rgb, halo, fx, fy, size=14, centered=False):
             """A text actor + a thin 8-offset halo (枠) of colour *halo* (0–1
             triple) behind it, so it stays legible over the image."""
+            size = self._rfs(size)                # 結果文字サイズ
             for ox, oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
                            (1, 0), (-1, 1), (0, 1), (1, 1)):
                 ha = vtkTextActor()
@@ -11968,7 +12011,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             ta.SetInput(text)
             ta.SetPosition(float(x), float(y), 0.8)
             ta.GetTextProperty().SetColor(1.0, 0.85, 0.0)
-            ta.GetTextProperty().SetFontSize(16)
+            ta.GetTextProperty().SetFontSize(self._rfs(16))
             ta.GetTextProperty().SetBold(True)
             ta.SetVisibility(not self._pane_is_vr(p))   # 2-D labels: not on VR
             p.ren.AddActor(ta)
@@ -14439,7 +14482,26 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
 
         def _right_left(ta, text):
             """Left edge (normalised x) so a left-aligned block's longest line
-            fits with ~1 char right margin. dpr cancels (width is a fraction)."""
+            fits with ~1 char right margin. The block is MEASURED (its real
+            rendered width) and its font shrunk when it is wider than the pane
+            — a narrow pane (1x2) clipped the right of 'Myocardium …' / 'LAD
+            …%' (user 2026-11-25). Falls back to an Arial estimate."""
+            try:
+                W = float(p.ren.GetSize()[0]) or 1.0
+                tp = ta.GetTextProperty()
+                for _ in range(6):
+                    bb = [0.0, 0.0, 0.0, 0.0]
+                    ta.GetBoundingBox(p.ren, bb)
+                    wpx = float(bb[1] - bb[0])
+                    if wpx <= 0.0:
+                        raise ValueError("no extent")
+                    fs0 = int(tp.GetFontSize())
+                    if wpx <= 0.96 * W or fs0 <= 8:
+                        break
+                    tp.SetFontSize(max(8, int(fs0 * 0.96 * W / wpx)))
+                return max(0.004, 1.0 - (wpx + 0.012 * W) / W)
+            except Exception:                            # noqa: BLE001
+                pass
             try:
                 w_px = float(p.ren.GetRenderWindow().GetSize()[0]) or 1.0
                 tfs = float(ta.GetTextProperty().GetFontSize())
@@ -14620,17 +14682,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Confine the result block to ~40% width (right) by word-wrapping it to
         # the fixed-size result actor (which honours the exact slider font).
         p.resultact.SetInput("\n".join(
-            wrap_lines_to_chars(lines, self._wrap_budget(key))))
+            wrap_lines_to_chars(lines, self._wrap_budget(key, result=True))))
         p.render()
         self._update_hideall_btn()
 
-    def _wrap_budget(self, key) -> int:
+    def _wrap_budget(self, key, result: bool = False) -> int:
         """Characters that fit within ~40% of the pane width at the current
-        (fixed) overlay font — the wrap width for both the tag block (left) and
-        result block (right). 0.6 char-width keeps the block strictly ≤40%."""
+        (fixed) font — the tag block (left, the tag size) or the result block
+        (right, *result*: the 結果文字サイズ). 0.6 char-width keeps the block
+        strictly ≤40%."""
         px = max(1, self.pane[key].canvas.width())
-        fpx = max(1, _vtk_font_px(
-            getattr(self, "_overlay_font_pt", TAG_FONT_PT_DEFAULT)))
+        fpx = max(1, self._rfs(_vtk_font_px(TAG_FONT_PT_DEFAULT)) if result
+                  else _vtk_font_px(
+                      getattr(self, "_overlay_font_pt", TAG_FONT_PT_DEFAULT)))
         return max(8, int(0.40 * px / (fpx * 0.6)))
 
     # ---- picking ----

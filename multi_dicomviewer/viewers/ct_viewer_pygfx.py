@@ -829,7 +829,7 @@ class _Overlay(QWidget):
             # type a target angle, like the MPR panes.
             ang = v._angio_angle(key)
             if ang:
-                fb = QFont("monospace", 18)
+                fb = QFont("monospace", v._rfs(18))
                 fb.setBold(True)
                 p.setFont(fb)
                 _draw_outlined_text(
@@ -1193,13 +1193,16 @@ class _Overlay(QWidget):
             fm = p.fontMetrics()
             lines = text.split("\n")
             maxw = max((fm.horizontalAdvance(s) for s in lines), default=0)
+            if maxw > w - 16 and pt > 8:             # narrow pane: shrink to fit
+                _block(text, bold, max(8, int(pt * (w - 16) / maxw)), corner)
+                return
             lh = fm.lineSpacing()
             bh = lh * len(lines) + 4
             if corner == "TR":
-                x = max(w * 0.40, w - maxw - 10)
+                x = max(6, w - maxw - 10)
                 y = 6
             else:                                    # BR (bottom-right)
-                x = max(w * 0.40, w - maxw - 10)
+                x = max(6, w - maxw - 10)
                 y = h - bh - 34                       # clear of the angle readout
             _draw_outlined_text(
                 p, QRectF(x, y, maxw + 6, bh),
@@ -1231,9 +1234,14 @@ class _Overlay(QWidget):
             widths = [fmb.horizontalAdvance(b) + fmr.horizontalAdvance(r)
                       for b, r in segs]
             maxw = max(widths, default=0)
+            if maxw > w - 16 and pt > 8:
+                # a narrow pane (1x2): shrink to fit instead of clipping the
+                # right of the lines (user 2026-11-25)
+                _block_terr_tr(text, max(8, int(pt * (w - 16) / maxw)))
+                return
             lh = max(fmb.lineSpacing(), fmr.lineSpacing())
             bh = lh + 4
-            x0 = max(w * 0.40, w - maxw - 10)
+            x0 = max(6, w - maxw - 10)
             y = 6
             for (b, r) in segs:
                 x = x0
@@ -1255,11 +1263,11 @@ class _Overlay(QWidget):
                         r, yellow, width=1.0)
                 y += lh
 
-        _block_terr_tr(getattr(v, "_terr_summary_text", ""), 13)
-        _block(getattr(v, "_tgt_summary_text", ""), True, 15, "BR")
+        _block_terr_tr(getattr(v, "_terr_summary_text", ""), v._rfs(13))
+        _block(getattr(v, "_tgt_summary_text", ""), True, v._rfs(15), "BR")
         # WW/WL bottom-left (same as the MPR panes' readout).
         _ww, _wl = v._wl_of(key)
-        p.setFont(QFont("monospace", 12))
+        p.setFont(QFont("monospace", v._rfs(12)))
         p.setPen(QColor(255, 255, 255))
         p.drawText(QRectF(6, h - 28, w - 12, 24),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -1451,7 +1459,7 @@ class _Overlay(QWidget):
         bw, seg = 22, 26                      # bar width / per-band height (2×)
         x0 = w - bw - 60
         y0 = h - seg * n - 44
-        p.setFont(QFont("monospace", 12))
+        p.setFont(QFont("monospace", v._rfs(12)))
         for i in range(n):
             r, g, b = cols[n - 1 - i]         # top = last band (thick/green)
             p.fillRect(QRectF(x0, y0 + i * seg, bw, seg),
@@ -1926,7 +1934,7 @@ class _Overlay(QWidget):
         bands = _gap_legend()
         if not bands:
             return
-        p.setFont(QFont("monospace", 11))
+        p.setFont(QFont("monospace", self._v._rfs(11)))
         _black, _white = QColor(0, 0, 0), QColor(255, 255, 255)
         lh = 16.0
         y = h - 40 - len(bands) * lh
@@ -2309,7 +2317,7 @@ class _Overlay(QWidget):
             # numeric id label at the anchor (hidden for a deselected CPR line)
             if not cpr_idle:
                 p.setPen(QColor(255, 217, 0))
-                fb = QFont("monospace", v._overlay_font_pt)
+                fb = QFont("monospace", v._rfs(TAG_FONT_PT_DEFAULT))
                 fb.setBold(True)
                 p.setFont(fb)
                 ax, ay = v._world_to_screen(key, *v._anchor(m))
@@ -2424,7 +2432,7 @@ class _Overlay(QWidget):
             lines = v._lv_status_lines() + lines
         if lines:                            # _metrics is already per-item filtered
             p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
-            p.setFont(QFont("monospace", v._overlay_font_pt))
+            p.setFont(QFont("monospace", v._rfs(TAG_FONT_PT_DEFAULT)))
             rx = w * 0.60
             flags = (int(Qt.AlignmentFlag.AlignRight)
                      | int(Qt.AlignmentFlag.AlignTop)
@@ -2439,7 +2447,7 @@ class _Overlay(QWidget):
                     draw_outline(v._outline(v._measures[key][smi]),
                                  (0, 229, 255), width=6.0)   # cyan = picked
             # instruction banner (top-centre) so the workflow is discoverable
-            fb = QFont("monospace", 13)
+            fb = QFont("monospace", v._rfs(13))
             fb.setBold(True)
             p.setFont(fb)
             p.setPen(QColor(0, 229, 255))
@@ -2491,7 +2499,7 @@ class _Overlay(QWidget):
             # one summary line per result + a single colour legend if any result
             # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
             # Legend text is white with a thin black 枠 (readable on any colour).
-            p.setFont(QFont("monospace", 11))
+            p.setFont(QFont("monospace", v._rfs(11)))
             _black, _white = QColor(0, 0, 0), QColor(255, 255, 255)
             bands = (_gap_legend()
                      if any(c["show_thk"] and not c.get("hidden") for c in cmps)
@@ -2530,7 +2538,7 @@ class _Overlay(QWidget):
         ph = v._probe_hover
         if ph is not None and ph[0] == key:
             _, hx, hy, htxt = ph
-            p.setFont(QFont("monospace", 11))
+            p.setFont(QFont("monospace", v._rfs(11)))
             p.setPen(QColor(255, 255, 102))
             p.drawText(QPointF(hx + 12, hy - 4), htxt)
 
@@ -2599,22 +2607,24 @@ class _Overlay(QWidget):
             if lvl is not None:
                 vlines.append(t("LVL: {v:.1f} mm").format(v=lvl))
             if vlines:
-                fb = QFont("monospace", 13)
+                fb = QFont("monospace", v._rfs(13))
                 fb.setBold(True)
                 p.setFont(fb)
                 _draw_outlined_text(
-                    p, QRectF(w * 0.50, 6, w * 0.50 - 6, 24 * len(vlines)),
+                    p, QRectF(w * 0.50, 6, w * 0.50 - 6,
+                              v._rfs(24) * len(vlines)),
                     int(Qt.AlignmentFlag.AlignRight)
                     | int(Qt.AlignmentFlag.AlignTop),
                     "\n".join(vlines), QColor(120, 220, 255), width=1.0)
-        p.setFont(QFont("monospace", 12))       # corner readouts stay compact
+        p.setFont(QFont("monospace", v._rfs(12)))       # corner readouts stay compact
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
         _ww, _wl = v._wl_of(key)
-        p.drawText(QRectF(6, h - 28, w - 12, 24),
+        _ch = v._rfs(24)                          # corner line height
+        p.drawText(QRectF(6, h - _ch - 4, w - 12, _ch),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                    f"WW {_ww:.0f}  WL {_wl:.0f}")
-        p.drawText(QRectF(6, h - 28, w - 12, 24),
+        p.drawText(QRectF(6, h - _ch - 4, w - 12, _ch),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    f"{key}  |  {kind}")
         # angio readout (yellow, bottom-centre) — clinical, always shown.
@@ -2622,10 +2632,10 @@ class _Overlay(QWidget):
         # with a black outline so the yellow stays legible over a white slice.
         ang = v._angio_angle(key)
         if ang:
-            fb = QFont("monospace", 18)
+            fb = QFont("monospace", v._rfs(18))
             fb.setBold(True)
             p.setFont(fb)
-            rect = QRectF(0, h - 42, w, 36)
+            rect = QRectF(0, h - 6 - v._rfs(36), w, v._rfs(36))
             flags = (Qt.AlignmentFlag.AlignHCenter
                      | Qt.AlignmentFlag.AlignBottom)
             _draw_outlined_text(p, rect, flags, ang,
@@ -7417,6 +7427,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._ps[key] = max(1e-3, max(hv, hu * ph / pw))
         self._pan[key] = np.zeros(2)
         self._config_cam(key)
+
+    def _apply_result_font(self) -> None:
+        """結果文字サイズ: the overlay painters read _rfs() — repaint both."""
+        for k in ("A", "B"):
+            ov = getattr(self, "_overlay", {}).get(k) \
+                if isinstance(getattr(self, "_overlay", None), dict) else None
+            if ov is not None:
+                ov.update()
 
     def set_overlay_font_pt(self, pt: int) -> None:
         """Apply the shared DICOM-tag / readout text size (pt), sync the slider
