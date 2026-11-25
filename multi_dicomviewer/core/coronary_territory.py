@@ -271,11 +271,25 @@ class CoronaryTree:
 
     def descendants(self, vid: str) -> list[str]:
         """All vessels downstream of ``vid`` (its whole sub-tree, exclusive)."""
-        out, stack = [], list(self.children(vid))
+        out, stack, seen = [], list(self.children(vid)), {vid}
         while stack:
             c = stack.pop()
+            if c in seen:                  # a loop (never valid) → stop
+                continue
+            seen.add(c)
             out.append(c)
             stack.extend(self.children(c))
+        return out
+
+    def ancestors(self, vid: str) -> list[str]:
+        """Parent, grand-parent, … of ``vid`` (loop-safe)."""
+        out, seen = [], {vid}
+        v = self.vessels.get(vid)
+        while v is not None and v.parent is not None \
+                and v.parent not in seen:
+            seen.add(v.parent)
+            out.append(v.parent)
+            v = self.vessels.get(v.parent)
         return out
 
     # ------------------------------------------------------- assignment

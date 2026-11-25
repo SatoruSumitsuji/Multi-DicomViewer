@@ -134,12 +134,12 @@ class AutoTrackProgress:
             b.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(t("右クリックでも停止できます"))
-            b.setStyleSheet(self._STOP_STYLE % (14, "4px 14px"))
+            b.setStyleSheet(self._STOP_STYLE % (25, "7px 25px"))   # ×1.8
             b.clicked.connect(self._on_cancel)
             b.adjustSize()
             if area is not None:
                 b.move(area.x() + (area.width() - b.width()) // 2,
-                       area.y() + 10)
+                       area.y() + 40)
             b.show()
             b.raise_()
             self._stop_btn = b

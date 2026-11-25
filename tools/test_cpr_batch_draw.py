@@ -167,6 +167,76 @@ check("stop: cancelled, reported", out["cancelled"]
       and t("（停止しました。残りの線は未処理です）")
       in ctw.CoronaryTreeWindow.batch_extend_text(out))
 
+# ---- a line whose trace never finishes: given up, the GUI stays alive ----
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from PyQt6.QtCore import QTimer  # noqa: E402
+
+from multi_dicomviewer.core import cpr_autoextend as _CAE  # noqa: E402
+
+_orig_tt = _CAE.trace_to_tree
+stuck = {"n": 0}
+
+
+def _tt(vol_, dims_, seed_, tg_, **kw):
+    if np.linalg.norm(np.asarray(seed_)[-1] - E2) < 8.0 or             np.linalg.norm(np.asarray(seed_)[0] - E2) < 8.0:
+        stuck["n"] += 1
+        while True:                       # a hang that ignores the stop
+            time.sleep(0.05)
+    return _orig_tt(vol_, dims_, seed_, tg_, **kw)
+
+
+_CAE.trace_to_tree = _tt
+for vid in ("d1", "d2"):
+    tree.vessels[vid].parent = None
+w.BATCH_LINE_TIMEOUT_S = 1.5
+ticks = []
+tm = QTimer()
+tm.timeout.connect(lambda: ticks.append(time.monotonic()))
+tm.start(50)
+t0 = time.monotonic()
+out = w.batch_extend(vol, dims)
+tm.stop()
+_CAE.trace_to_tree = _orig_tt
+st = {d["name"]: d["stop"] for d in out["done"]}
+check("a hanging line is given up after the time limit (×, timeout)",
+      stuck["n"] == 1 and st.get("D2") == "timeout"
+      and not tree.vessels["d2"].fin_traced, st)
+check("… and the other lines still run", tree.vessels["d1"].parent == "lad"
+      and "D1" in st, st)
+gaps = np.diff(ticks) if len(ticks) > 1 else np.array([99.0])
+check("the GUI keeps running meanwhile (no frozen window)",
+      len(ticks) >= 20 and float(gaps.max()) < 0.5,
+      (len(ticks), float(gaps.max())))
+check("timeout named in the summary",
+      t("時間切れ（この線の追跡が終わらなかった）")
+      in ctw.CoronaryTreeWindow.batch_extend_text(out))
+
+# ---- loops (X → Y → X) can never freeze the app -------------------------
+tree.vessels["d1"].parent = "d2"
+tree.vessels["d1"].junction = 0
+tree.vessels["d2"].parent = None
+check("a line hanging on this one is never its target (no loop made)",
+      "d1" in tree.descendants("d2"))
+tree.vessels["d2"].parent = "d1"                 # force a loop
+res = {}
+
+
+def _walk():
+    res["a"] = tree.descendants("d1")
+    res["b"] = tree.ancestors("d1")
+    res["c"] = w._root_role("d1")
+
+
+th = threading.Thread(target=_walk, daemon=True)
+th.start()
+th.join(5.0)
+check("a loop in the tree: walking it ends (no endless loop)",
+      not th.is_alive() and res.get("a") == ["d2"], res)
+tree.vessels["d2"].parent = None
+tree.vessels["d1"].parent = "lad"
+
 # ---- the button between Draw and Auto, on both viewers ---------------------
 for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (ROOT / "multi_dicomviewer" / "viewers" / f).read_text(
@@ -176,6 +246,10 @@ for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     i_a = src.find("row.addWidget(self._cpr_auto_btn)")
     check(f"{f}: 一括描出 between Draw and Auto",
           0 < i_d < i_b < i_a and 'FitButton(t("一括描出"))' in src)
+    i_s = src.find("def _coronary_sync_ui")
+    body = src[i_s:src.find("\n    def ", i_s + 10)]
+    check(f"{f}: 一括描出 greyed out while drawing",
+          "self._cpr_batch_btn.setEnabled(not pend)" in body)
 mw = (ROOT / "multi_dicomviewer" / "ui" / "main_window.py").read_text(
     encoding="utf-8")
 check("shell: coronary_batch_extend runs it under the stop button",

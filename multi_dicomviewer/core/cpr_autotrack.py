@@ -259,9 +259,12 @@ def _snap(L, k, radius_vox, sigma_vox):
     for a brighter vein a few mm away."""
     r = int(max(0, round(radius_vox)))
     z, y, x = k
-    zs = slice(max(0, z - r), z + r + 1)
-    ys = slice(max(0, y - r), y + r + 1)
-    xs = slice(max(0, x - r), x + r + 1)
+    # (clipped at BOTH ends: a click near the far edge of the ROI made the
+    # index grid larger than the sub-block → broadcast error)
+    nz, ny, nx = L.shape
+    zs = slice(max(0, z - r), min(nz, z + r + 1))
+    ys = slice(max(0, y - r), min(ny, y + r + 1))
+    xs = slice(max(0, x - r), min(nx, x + r + 1))
     sub = L[zs, ys, xs]
     gz, gy, gx = np.mgrid[zs, ys, xs]
     d2 = (gz - z) ** 2 + (gy - y) ** 2 + (gx - x) ** 2

@@ -1425,9 +1425,8 @@ class CoronaryTreeWindow(SnapDock):
         self._push_territory()                    # territory + target colours
 
     def _root_role(self, vid: str) -> str:
-        v = self._tree.vessels.get(vid)
-        while v is not None and v.parent is not None:
-            v = self._tree.vessels.get(v.parent)
+        anc = self._tree.ancestors(vid)          # loop-safe
+        v = self._tree.vessels.get(anc[-1] if anc else vid)
         return v.role if v is not None else ""
 
     def _junction_text(self, vid: str) -> str:
@@ -3527,7 +3526,9 @@ class CoronaryTreeWindow(SnapDock):
         "bifurcation": "分岐で太さ・向きが同程度（幹を決めない）",
         "edge": "画像の端", "length": "長さの上限", "contrast": "造影が弱い",
         "cancel": "停止（ここまでを残しました）", "short": "線が短い",
-        "fork": "分岐（進む内腔を選んでください）"}
+        "fork": "分岐（進む内腔を選んでください）",
+        "timeout": "時間切れ（この線の追跡が終わらなかった）",
+        "error": "エラー"}
 
     @classmethod
     def stop_text(cls, code: str) -> str:
@@ -3645,6 +3646,63 @@ class CoronaryTreeWindow(SnapDock):
         None, role 枝) of the active CT."""
         return list(self._tree.unconnected())
 
+    #: 一括描出: one line may take at most this long (s); then it is given
+    #: up (FinTrace ×) and the next one runs
+    BATCH_LINE_TIMEOUT_S = 90.0
+
+    def _run_line(self, fn, cancel, progress, timeout_s):
+        """Run *fn(cancel, progress, log)* in a worker thread while the GUI
+        keeps running (the stop button / repaint work; the progress text is
+        updated from here, never from the worker). Returns (result, log,
+        "ok" | "timeout" | "error")."""
+        import threading
+        import time
+        from PyQt6.QtWidgets import QApplication
+        box = {"res": None, "err": None, "prog": None}
+        abort = {"on": False}
+        log = []
+
+        def _cancel():
+            return abort["on"] or (cancel is not None and cancel())
+
+        def _prog(*a):
+            box["prog"] = a
+
+        def _work():
+            try:
+                box["res"] = fn(_cancel, _prog, log)
+            except Exception as exc:                     # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+                box["err"] = exc
+
+        th = threading.Thread(target=_work, daemon=True)
+        th.start()
+        t0 = time.monotonic()
+        last = None
+        app = QApplication.instance()
+        while th.is_alive():
+            th.join(0.03)
+            if box["prog"] is not None and box["prog"] is not last:
+                last = box["prog"]
+                if progress is not None:
+                    progress(*last)
+            elif app is not None:
+                app.processEvents()
+            if time.monotonic() - t0 > timeout_s and not abort["on"]:
+                abort["on"] = True                       # ask it to stop …
+                t1 = time.monotonic()
+                while th.is_alive() and time.monotonic() - t1 < 3.0:
+                    th.join(0.05)
+                    if app is not None:
+                        app.processEvents()
+                if th.is_alive():                        # … else leave it
+                    return None, list(log), "timeout"
+                return box["res"], list(log), "timeout"
+        if box["err"] is not None:
+            return None, list(log), "error"
+        return box["res"], list(log), "ok"
+
     def batch_extend(self, vol, dims, cancel=None, progress=None) -> dict:
         """一括描出 (user 2026-11-25): every unconnected branch line (a few
         points at a branch's distal end) is traced PROXIMALLY until it meets
@@ -3652,8 +3710,11 @@ class CoronaryTreeWindow(SnapDock):
         A line that stops on its way stays unconnected (FinTrace ×) and the
         next one goes on. Each is traced against the tree as it is then (a
         line traced earlier counts too). Files are rewritten like
-        Auto-Track. {"done": [{vid, name, reached, added_mm, stop,
-        parent}], "cancelled", "changed": {vid: old path}}."""
+        Auto-Track. Each line runs in a worker thread (the GUI stays
+        responsive) with a time limit (BATCH_LINE_TIMEOUT_S): a line that
+        does not finish is given up (×, "timeout") and the next one runs.
+        {"done": [{vid, name, reached, added_mm, stop, parent}],
+        "cancelled", "changed": {vid: old path}}."""
         from multi_dicomviewer.core.cpr_autoextend import (save_log,
                                                            trace_to_tree)
         out = {"done": [], "cancelled": False, "changed": {}, "log_path": ""}
@@ -3670,8 +3731,11 @@ class CoronaryTreeWindow(SnapDock):
             v = tree.vessels.get(vid)
             if v is None or v.parent is not None:
                 continue
+            # never a line hanging on this one (directly or further down)
+            # as its target: that would make a loop
+            below = set(tree.descendants(vid))
             others = [(o, ov.points) for o, ov in tree.vessels.items()
-                      if o != vid and ov.n >= 2]
+                      if o != vid and o not in below and ov.n >= 2]
             if not others:
                 break
             seed = np.asarray(v.ctrl if v.ctrl is not None
@@ -3685,11 +3749,33 @@ class CoronaryTreeWindow(SnapDock):
             tree_ok = [p for o, p in others
                        if tree.vessels[o].role in ROOT_ROLES
                        or tree.vessels[o].parent is not None]
-            r = trace_to_tree(vol, dims, seed, [p for _o, p in others],
-                              cancel=cancel, progress=prog,
-                              orient=tree_ok or None)
+            tg = [p for _o, p in others]
+            logs.append({"batch_line": k + 1, "of": len(todo),
+                         "seed": [[round(float(c), 2) for c in q]
+                                  for q in seed]})
+
+            def job(cc, pp, lg, _s=seed, _tg=tg, _o=tree_ok or None):
+                return trace_to_tree(vol, dims, _s, _tg, cancel=cc,
+                                     progress=pp, orient=_o, log=lg)
+
+            r, lg, how = self._run_line(
+                job, cancel,
+                lambda *a: prog(*a[:3]), self.BATCH_LINE_TIMEOUT_S)
+            if r is None:                    # timed out / failed: next line
+                logs.extend(lg)
+                logs.append({"batch_line": k + 1, "gave_up": how})
+                v.fin_traced = False
+                out["done"].append({"vid": vid, "name": v.name,
+                                    "reached": False, "added_mm": 0.0,
+                                    "stop": how, "parent": None})
+                if cancel is not None and cancel():
+                    out["cancelled"] = True
+                    break
+                continue
             logs.extend(r.log)
-            if r.stop == "cancel" and not r.reached:
+            if how == "timeout":
+                r.stop = "timeout" if not r.reached else r.stop
+            elif r.stop == "cancel" and not r.reached:
                 out["cancelled"] = True
             changed = (len(r.ctrl) != len(seed)
                        or not np.allclose(r.ctrl, seed))
@@ -3704,7 +3790,10 @@ class CoronaryTreeWindow(SnapDock):
             parent = None
             if r.reached and 0 <= r.target < len(others):
                 parent = others[r.target][0]
-                tree.set_parent(vid, parent, int(r.junction))
+                if vid in tree.ancestors(parent):        # (never a loop)
+                    parent = None
+                else:
+                    tree.set_parent(vid, parent, int(r.junction))
             v.fin_traced = bool(parent)
             out["done"].append({"vid": vid, "name": v.name,
                                 "reached": bool(parent),

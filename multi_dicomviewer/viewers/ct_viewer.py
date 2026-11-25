@@ -4069,6 +4069,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # so it's obvious Draw is active / a CPR is being created.
             self._cpr_draw_btn.setStyleSheet(
                 self._LV_STY["trace"] if pend else self._LV_STY["off"])
+        if getattr(self, "_cpr_batch_btn", None) is not None:
+            # 一括描出: greyed out while drawing (user 2026-11-25)
+            self._cpr_batch_btn.setEnabled(not pend)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()

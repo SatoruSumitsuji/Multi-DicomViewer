@@ -913,14 +913,14 @@ def _lumen_stats(V, C, dir_mm=3.0, bg_hu=50.0):
 
 def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
                   cancel=None, progress=None, on_step=None,
-                  guided: bool = False) -> ExtendResult:
+                  guided: bool = False, log=None) -> ExtendResult:
     """Trace on from the LAST point of *ctrl* (world mm, ≥ 2 points,
     proximal → distal). The trunk's continuation (A案) and every branch met
     on the way (each its own unbranched Segment)."""
     prm = prm or ExtendParams()
     V = _Vol(vol, dims)
     C = np.asarray(ctrl, float).reshape(-1, 3)
-    log = []
+    log = log if log is not None else []        # (the caller may watch it)
     if len(C) < 2:
         return ExtendResult(None, [], "short", log)
     lumen, bg, r, d, thr = _lumen_stats(V, C, prm.dir_mm, prm.bg_hu)
@@ -1021,7 +1021,8 @@ def _proximal_first(seed, stack):
 def trace_to_tree(vol, dims, seed, targets, prm: ExtendParams | None = None,
                   cancel=None, progress=None, reach_mm: float = 3.0,
                   near_mm: float = 4.5,
-                  inside_mm: float = 1.6, orient=None) -> ToTreeResult:
+                  inside_mm: float = 1.6, orient=None,
+                  log=None) -> ToTreeResult:
     """一括描出 (user 2026-11-25): a short line set at a branch's distal
     end (*seed*, 2–3 points, either order) is traced PROXIMALLY until it
     meets one of *targets* (the other lines of the tree, (N,3) each) — it
@@ -1069,7 +1070,7 @@ def trace_to_tree(vol, dims, seed, targets, prm: ExtendParams | None = None,
         return ToTreeResult(S, 0.0, dist0 <= reach_mm, i0, j0, dist0,
                             "reached" if dist0 <= reach_mm else "short", [])
     res = extend_vessel(vol, dims, S[::-1], prm, cancel=cancel,
-                        progress=progress, on_step=on_step)
+                        progress=progress, on_step=on_step, log=log)
     ctrl = S
     added = 0.0
     if res.trunk is not None:

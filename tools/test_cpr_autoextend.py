@@ -450,13 +450,13 @@ with _atp.AutoTrackProgress(None, anchor=[spy, spy2]) as _pg:
     sb_shown = (sb is not None and sb.isVisible()
                 and sb.text() == t("■ Auto-Track 停止")
                 and "#d62828" in sb.styleSheet()
-                and "font-size:14px" in sb.styleSheet())
+                and "font-size:25px" in sb.styleSheet())
     top = spy.mapToGlobal(spy.rect().topLeft())
     right = spy2.mapToGlobal(spy2.rect().topRight())
     mid = (top.x() + right.x()) / 2.0
-    at_top = (sb is not None and abs(sb.y() - (top.y() + 10)) <= 2
+    at_top = (sb is not None and abs(sb.y() - (top.y() + 40)) <= 2
               and abs(sb.x() + sb.width() / 2.0 - mid) <= 2
-              and sb.height() < 40)
+              and 40 <= sb.height() < 80)
     from PyQt6.QtTest import QTest  # noqa: E402
     QTest.mouseClick(sb, _Qt.MouseButton.LeftButton)
     c_btn = _pg.cancelled()
