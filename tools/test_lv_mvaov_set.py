@@ -195,7 +195,9 @@ for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     check(f"{f}: no Auto on the MV-AoV+Apex row",
           "self._lv_ve_auto_btn.setVisible(not mvx)" in s)
     check(f"{f}: AoV not in the LV selectors",
-          "self._lv_selectors = [self._lv_cap, self._lv_mv_btn,\n" in s.replace("\r\n", "\n"))
+          "self._lv_selectors = [self._lv_cap, self._lv_full_load_btn,\n"
+          "                              self._lv_mv_btn,\n"
+          "                              self._lv_epi_btn," in s.replace("\r\n", "\n"))
     check(f"{f}: MV-AoV point drawn as a point",
           '"type": "point",\n                    "pts": [self._world3d_to_out(k, np.asarray(P))]'
           in s.replace("\r\n", "\n"))

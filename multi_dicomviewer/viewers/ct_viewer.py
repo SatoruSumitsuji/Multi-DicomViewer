@@ -3891,7 +3891,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_epi_show_btn = FitButton(t("Epi"))
         self._cpr_epi_show_btn.setCheckable(True)
         self._cpr_epi_show_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
+            "QPushButton:checked{background:#2e8b57;color:white;}"
+            + self._BTN_DIS)
         self._cpr_epi_show_btn.setHelpToolTip(t(
             "Epi 境界の表示・非表示（左ペインの短軸像のみ）。このCTに Epi 境界が"
             "ある場合、自動トレースで中抜き丸になる編集点は Epi 面上に置かれます。"))
@@ -4044,6 +4045,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # any in-progress trace.
         if getattr(self, "_cpr_load_btn", None) is not None:
             self._cpr_load_btn.setEnabled(not pend)
+        self._cpr_epi_btn_refresh()          # Epi greyed without an Epi border
         if getattr(self, "_cpr_exit_btn", None) is not None:
             self._cpr_exit_btn.setEnabled(True)
         if getattr(self, "_cpr_save_btn", None) is not None:
@@ -4083,6 +4085,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # itself relays out the bar; _lv_sync_cpr_btn is called explicitly too in
         # case the LV bar is not built yet (it guards internally).
         self._lv_sync_cpr_btn()
+        self._cpr_epi_btn_refresh()          # CPR Epi follows the Epi data
         if hasattr(self, "_lv_grp_trace"):
             self._lv_update_submode_ui()
         elif hasattr(self, "_lv_relayout_bar"):
@@ -5888,6 +5891,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 if b is not None:
                     b.setEnabled(False)
         self._lv_sync_cpr_btn()
+        self._cpr_epi_btn_refresh()          # CPR Epi follows the Epi data
         # Apply the Coronary/LV file-context show-hide LAST (after every enable/vis
         # above), so a .corotree drop keeps the LV half hidden and a .FullLv drop
         # keeps Coronary:CPR hidden.
@@ -11207,6 +11211,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         measure type (Measure off, or on but idle) they are their normal
         colour and usable (selected = red). MPR-only tools also stay disabled
         in 2-D native-slice mode."""
+        if hasattr(self, "_cpr_epi_btn_refresh"):
+            self._cpr_epi_btn_refresh()      # CPR Epi greyed without an Epi
         measuring = getattr(self, "_meas_on", False) and bool(
             getattr(self, "_meas_type", None))
         if getattr(self, "_frames", None):

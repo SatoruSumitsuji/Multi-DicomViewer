@@ -1364,6 +1364,23 @@ class CPRMixin:
             except Exception:                    # noqa: BLE001
                 pass
 
+    def _cpr_epi_btn_refresh(self) -> None:
+        """CPR row → Epi greyed out while this CT has no Epi border (user
+        2026-11-25); turned off if the Epi went away while it was on."""
+        b = getattr(self, "_cpr_epi_show_btn", None)
+        if b is None:
+            return
+        try:
+            _k, md, surf = self._coro_epi()
+            has = surf is not None or isinstance(md, dict)
+        except Exception:                        # noqa: BLE001
+            has = False
+        if b.isEnabled() != has:
+            b.setEnabled(has)
+        if not has and getattr(self, "_cpr_epi_show", False):
+            self._cpr_epi_show = False
+            self._cpr_epi_show_sync(False)
+
     def _cpr_epi_show_sync(self, on) -> None:
         b = getattr(self, "_cpr_epi_show_btn", None)
         if b is not None:
