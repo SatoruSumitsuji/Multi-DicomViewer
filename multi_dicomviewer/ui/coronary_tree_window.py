@@ -4661,15 +4661,31 @@ class CoronaryTreeWindow(SnapDock):
                 return _parent(d)
         return ""
 
+    #: ui_state key: the file name of the .corotree.json saved last (any CT)
+    _TREE_NAME_KEY = "corotree_last_name"
+
+    def _tree_save_default(self) -> str:
+        """The path the ツリー保存 dialog proposes (user 2026-11-26: usually an
+        overwrite, so always offer the file saved last): this CT's tree file
+        saved / loaded before (same folder + name), else the file NAME saved
+        last (remembered across sessions) in the default folder, else
+        coronary.corotree.json there."""
+        lp = self._last_path or ""
+        if (lp.lower().endswith(".corotree.json")
+                and os.path.isdir(os.path.dirname(lp) or "")):
+            return lp
+        name = settings_mod.load_ui_state(self._TREE_NAME_KEY, "") or ""
+        if not (isinstance(name, str) and name.lower().endswith(".corotree.json")
+                and os.path.basename(name) == name):
+            name = "coronary.corotree.json"
+        d = self._tree_save_dir()
+        return os.path.join(d, name) if d else name
+
     def _save_as(self):
         if not self._tree.vessels:
             self._warn(t("保存する血管がありません。"))
             return
-        # Default to the source 3-D CT's folder (then the last-saved folder once a
-        # save/load has happened this session for this dataset).
-        d = self._tree_save_dir()
-        default = os.path.join(d, "coronary.corotree.json") if d \
-            else "coronary.corotree.json"
+        default = self._tree_save_default()
         path, _ = QFileDialog.getSaveFileName(
             self, t("冠動脈ツリーを保存"), default, t("CoroTree (*.corotree.json)"))
         if path:
@@ -4738,6 +4754,9 @@ class CoronaryTreeWindow(SnapDock):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self._last_path = path
+            if str(path).lower().endswith(".corotree.json"):
+                settings_mod.save_ui_state(self._TREE_NAME_KEY,
+                                           os.path.basename(path))
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
