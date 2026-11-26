@@ -116,14 +116,36 @@ h._meas_type = "polyline"
 chk("map edit off while a draw type is armed", not h._cpr_map_edit_ok("B"))
 h._meas_type = None
 
-# ---- rubber band: x 18..42 mm, y 0..40 mm → points 3,4,5,6,7 (x 20..40)
+# ---- lasso polygon (user 2026-11-26, was a rectangle): traced round
+# x 18..42 mm, y 0..40 mm → points 3,4,5,6,7 (x 20..40)
 h._cpr_band_start("B", 180, 0)
-h._cpr_band_move(420, 400)
-chk("band: rectangle drawable", h._cpr_band_world_rect("B") is not None
-    and len(h._cpr_band_world_rect("B")) == 5)
+for _q in ((420, 0), (420, 400), (180, 400)):
+    h._cpr_band_move(*_q)
+chk("band: polygon drawable (closed)", h._cpr_band_world_rect("B") is not None
+    and len(h._cpr_band_world_rect("B")) == 5
+    and h._cpr_band_world_rect("B")[0] == h._cpr_band_world_rect("B")[-1])
 h._cpr_band_end()
 chk("band: selects the points inside", h._cpr_sel_get() == {3, 4, 5, 6, 7},
     f"{sorted(h._cpr_sel_get())}")
+# a triangle (not a box): only the points inside the polygon itself
+_sel0 = set(h._cpr_sel_get())
+_pts = [h._cpr_screen_xy("B", q) for q in h._measures["B"][0]["pts"]]
+_tri = [(180, -50), (420, -50), (180, 450)]
+_want = {k for k, (qx, qy) in enumerate(_pts)
+         if h._cpr_in_poly(_tri, qx, qy)}
+_box = {k for k, (qx, qy) in enumerate(_pts)
+        if 180 <= qx <= 420 and -50 <= qy <= 450}
+h._cpr_band_start("B", *_tri[0])
+for _q in _tri[1:]:
+    h._cpr_band_move(*_q)
+h._cpr_band_end()
+chk("lasso: a triangle selects only what it encloses",
+    h._cpr_sel_get() == _want and _want and _want != _box,
+    f"{sorted(h._cpr_sel_get())} want {sorted(_want)} box {sorted(_box)}")
+chk("point-in-polygon helper",
+    CPRMixin._cpr_in_poly([(0, 0), (10, 0), (0, 10)], 2, 2)
+    and not CPRMixin._cpr_in_poly([(0, 0), (10, 0), (0, 10)], 8, 8))
+h._cpr_sel_set(_sel0)
 chk("band: selected points drawable", len(h._cpr_sel_world_pts("B")) == 5)
 # Shift+click toggles one off / on.
 h._cpr_band_start("B", 400, 200)

@@ -1345,6 +1345,14 @@ class _Overlay(QWidget):
             ax_, ay_ = v._cpr_offset_to_screen(*a)
             bx_, by_ = v._cpr_offset_to_screen(*b)
             p.drawLine(QPointF(ax_, ay_), QPointF(bx_, by_))
+        # … and its SLAB (thickness > 0): both faces dotted, 50 %
+        for (a, b) in v._cpr_map_slab_section_2d():
+            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, 128), 1.2)
+            pen.setStyle(Qt.PenStyle.DotLine)
+            p.setPen(pen)
+            ax_, ay_ = v._cpr_offset_to_screen(*a)
+            bx_, by_ = v._cpr_offset_to_screen(*b)
+            p.drawLine(QPointF(ax_, ay_), QPointF(bx_, by_))
         epi = v._cpr_epi_section_2d()             # CPR row → Epi (short axis)
         if epi:
             p.setPen(QPen(QColor(*v._CPR_EPI_RGB), 1.6))
@@ -2336,7 +2344,7 @@ class _Overlay(QWidget):
                 _ox, _oy = v._world3d_to_out(key, np.asarray(_p3[_k], float))
                 dots([(_ox, _oy)], QColor(64, 220, 64), 7.0)
         # CPR map pane: Shift+drag selected edit points (magenta rings) and the
-        # rubber-band rectangle (cyan) while dragging.
+        # lasso polygon (cyan) while dragging.
         _sel = v._cpr_sel_world_pts(key)
         if _sel:
             dots_hollow(_sel, QColor(255, 60, 255), 8.0, 2.0)
@@ -3625,7 +3633,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_seed_exclude(key, x, y)
             self._reset_pointer_state()
             return
-        # CPR MAP pane (edit mode): Shift+drag = rubber-band select edit points
+        # CPR MAP pane (edit mode): Shift+drag = lasso (polygon) select edit points
         # (Shift+click toggles one); a plain click drops the selection and goes
         # on as usual. A right-click with a selection → its bulk-edit menu
         # (deferred out of the pointer handler — modal-in-press safety).
@@ -3640,8 +3648,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 QTimer.singleShot(
                     0, lambda k=key, sx=x, sy=y: self._cpr_sel_menu(k, sx, sy))
                 return
-        # Tree line ENDS (connect): Shift+click toggles an end, Shift+drag a
-        # rectangle; a right-click with ends selected → 「connect」 (deferred).
+        # Tree line ENDS (connect): Shift+click toggles an end, Shift+drag a lasso
+        # polygon; a right-click with ends selected → 「connect」 (deferred).
         if (self._coro_end_sel_ok(key) and self._draft is None
                 and not self._cpr_map_edit_ok(key)):
             if self._drag_btn == 1:
@@ -3817,7 +3825,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if capturing or started:
                 self._meas_drag = bool(started)
                 return
-            # idle Measure mode → fall through to the tool / crosshair setup
+            # idle Measure (no type): 橙なら Alt+ (user 2026-11-26) — the view
+            # tools and the crosshair grab need Alt too. Only the short-axis
+            # edit-point grab / click-move below still runs.
+            if self._drag_btn == 1 and not (self._cpr is not None
+                                            and key == "A"):
+                return
         # Short-axis (CPR) pane A: right-click ▸ Add Point / Delete Point on the
         # edit (control) points. Deferred out of the pointer handler so the
         # modal menu never swallows the pointer-up (the Mac dead-buttons bug).
@@ -3891,7 +3904,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                         self._last = (x, y)
                         self._meas_drag = False
                         return
-                if self._tool in ("ROTATE", "SPIN"):
+                if self._tool in ("ROTATE", "SPIN") and not (
+                        self._meas_on and not _alt):     # 橙なら Alt+
                     self._cpr_rot_start(x, y)
             return
         # A view-changing drag begins here (crosshair move/rotate OR the active
@@ -4027,6 +4041,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if bool(self._meas_type) or self._center_angle_target is not None:
                 if self._meas_type == "point":
                     self._measure_hover(key, x, y)
+                return
+            # idle Measure: 橙なら Alt+ (user 2026-11-26) — no view-tool drag;
+            # only a grabbed short-axis edit point still drags, and the
+            # crosshair hover preview shows only with Alt held.
+            if not ((self._drag_btn == 1 and self._cpr is not None
+                     and key == "A" and self._cpr_drag is not None)
+                    or (self._drag_btn != 1
+                        and "Alt" in (ev.get("modifiers") or ()))):
                 return
         else:
             self._clear_hover_handle()
@@ -5054,8 +5076,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Measuring with a type chosen (view tools need Alt+drag): the active
         # frame is ORANGE and twice as thick (user 2026-11-25). The frames
         # always take 6 px (border + padding), so the images never shift.
-        alt = bool(getattr(self, "_meas_on", False)
-                   and getattr(self, "_meas_type", None))
+        # 橙なら Alt+ (user 2026-11-26): with Measure on the view tools ALWAYS
+        # need Alt — a type chosen or not — so the frame is orange whenever
+        # Measure is on.
+        alt = bool(getattr(self, "_meas_on", False))
         for key, f in self._frames.items():
             act = key == self._active_pane
             colr = ("#ff8c00" if alt else "#ff2020") if act else "transparent"
@@ -20228,6 +20252,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coronary_mode = False
         self._coronary_mpr_pending = False
         self._cpr_search_ring = None                  # no Auto-Track ring left
+        self._cpr_at_pending = None                   # nor 「Auto-Track 終了」
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
@@ -20844,6 +20869,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a_at = None
         if self._cpr_autotrack_center_ok():
             a_at = menu.addAction(t("Auto-Track 開始"))
+        # 「中心を指定して続ける」 waiting but no centre to set → end it there
+        a_end = None
+        if self._cpr_autotrack_end_ok():
+            a_end = menu.addAction(t("Auto-Track 終了"))
+        if a_at is not None or a_end is not None:
             menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an
@@ -20859,6 +20889,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         act = menu.exec(QCursor.pos())
         if a_at is not None and act is a_at:
             self._cpr_autotrack_resume()  # from the point as it is now
+        elif a_end is not None and act is a_end:
+            self._cpr_autotrack_end()     # end here (temporary point removed)
         elif act is a_add:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._cpr_screen_to_offset(sx, sy)   # section camera, not MPR

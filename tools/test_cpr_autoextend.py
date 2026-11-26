@@ -233,6 +233,7 @@ class Host(QWidget, CPRMixin):
         self.undo.append((pane, before))
 
     _AUTOTRACK_STEP_S = 0.0
+    _AUTOTRACK_DRAW_S = 0.0     # draw every step (the live-view checks)
 
     def _redraw_meas(self, key):
         pass
@@ -364,6 +365,10 @@ class LiveHost(Host):
                                  for x in self._frame["B"])))
 
 
+check("full speed by default: no pause per step, the view redrawn "
+      "at most every 0.15 s (user 2026-11-26)",
+      CPRMixin._AUTOTRACK_STEP_S == 0.0
+      and 0.0 < CPRMixin._AUTOTRACK_DRAW_S <= 0.2)
 lh = LiveHost()
 lh._cpr_autotrack("B", 0)
 seen = lh.__dict__.get("seen", [])

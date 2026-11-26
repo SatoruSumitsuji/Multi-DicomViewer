@@ -162,6 +162,7 @@
   "Auto-Trace中…": "Auto-Trace 中…",
   "Auto-Track": "Auto-Track",
   "Auto-Track でエラーが発生しました: {e}": "Auto-Track 发生错误：{e}",
+  "Auto-Track 終了": "结束 Auto-Track",
   "Auto-Track 開始": "开始 Auto-Track",
   "Auto-Track: 準備中…": "Auto-Track：准备中…",
   "Auto-page through the slices head → feet (loops; click again to stop). Keys: D = play / ×2 speed, S = stop": "自动逐层播放切片（头侧→足侧，循环；再次点击停止）。按键：D = 播放/2倍速，S = 停止",

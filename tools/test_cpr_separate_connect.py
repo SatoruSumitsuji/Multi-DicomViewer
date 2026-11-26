@@ -217,8 +217,9 @@ h._cpr_band_start("B", 195, 100, ends=True)        # Shift+click on a.last
 h._cpr_band_end()
 check("Shift+click toggles the nearest end",
       h._coro_end_sel_get() == {("a", "last")})
-h._cpr_band_start("B", 225, 90, ends=True)          # rectangle 22.5..24 mm
-h._cpr_band_move(245, 110)
+h._cpr_band_start("B", 225, 90, ends=True)          # polygon 22.5..24 mm
+for _q in ((245, 90), (245, 110), (225, 110)):
+    h._cpr_band_move(*_q)
 h._cpr_band_end()
 check("Shift+drag selects the ends inside (replacing)",
       h._coro_end_sel_get() == {("b", "first")})

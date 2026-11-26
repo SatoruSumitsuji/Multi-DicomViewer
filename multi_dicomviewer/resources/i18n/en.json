@@ -56,6 +56,7 @@
   "Auto-Trace中…": "Auto-Tracing…",
   "Auto-Track": "Auto-Track",
   "Auto-Track でエラーが発生しました: {e}": "Auto-Track failed with an error: {e}",
+  "Auto-Track 終了": "End Auto-Track",
   "Auto-Track 開始": "Start Auto-Track",
   "Auto-Track: 準備中…": "Auto-Track: preparing…",
   "AutoTrace が × の線をまとめて自動トレース（FinTrace が ◯ の線は除く。Vessel を選択中は選択した行だけ）。結果は同じ .cpr.json に上書き": "Auto-trace all lines whose AutoTrace is × in one go (lines with FinTrace ◯ are skipped; only the selected rows while vessels are selected). The result overwrites the same .cpr.json",

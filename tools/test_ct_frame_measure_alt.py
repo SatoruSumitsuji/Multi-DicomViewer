@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """The active pane's frame (user 2026-11-25): red 3 px normally; ORANGE and
-twice as thick (6 px) while measuring with a type chosen (the view tools
-then need Alt+drag). The images never shift (the frames always take 6 px).
+twice as thick (6 px) while Measure is on — a type chosen or not (橙なら
+Alt+, user 2026-11-26: the view tools then ALWAYS need Alt+drag; a plain
+drag with Measure on and no type no longer runs them). The images never
+shift (the frames always take 6 px).
 Real VTK CTViewer on synthetic data (made-up patient).
 
     python tools/test_ct_frame_measure_alt.py
@@ -85,7 +87,38 @@ check("normal: red 3 px", "3px solid #ff2020" in s0 and "transparent" in o0, s0)
 v._meas_btn.setChecked(True)
 v._toggle_measure()
 s1, _o1, _g1 = state()
-check("Measure on, no type yet (tools still work): red", "#ff2020" in s1, s1)
+check("Measure on, no type yet: orange too (橙なら Alt+)",
+      "6px solid #ff8c00" in s1, s1)
+
+# a plain left-drag with Measure on (no type) no longer runs the view tool;
+# Alt+drag does
+from PyQt6.QtCore import QPointF, Qt  # noqa: E402
+from PyQt6.QtGui import QMouseEvent  # noqa: E402
+
+
+def _drag(alt):
+    cv = v.pane["B"].canvas
+    mods = (Qt.KeyboardModifier.AltModifier if alt
+            else Qt.KeyboardModifier.NoModifier)
+    L = Qt.MouseButton.LeftButton
+    a, b = QPointF(150, 150), QPointF(190, 175)
+    cv.mousePressEvent(QMouseEvent(QMouseEvent.Type.MouseButtonPress, a,
+                                   a, L, L, mods))
+    cv.mouseMoveEvent(QMouseEvent(QMouseEvent.Type.MouseMove, b, b,
+                                  Qt.MouseButton.NoButton, L, mods))
+    cv.mouseReleaseEvent(QMouseEvent(QMouseEvent.Type.MouseButtonRelease, b,
+                                     b, L, Qt.MouseButton.NoButton, mods))
+
+
+_got = []
+_orig_drag = v._drag
+v._drag = lambda *a, **k: _got.append(a)
+v._set_tool("MOVE")
+_drag(False)
+check("Measure on, no type: a plain drag runs no view tool", not _got, _got)
+_drag(True)
+check("Measure on, no type: Alt+drag runs it", bool(_got))
+v._drag = _orig_drag
 v._set_measure_type("polyline")
 for _ in range(5):
     app.processEvents()

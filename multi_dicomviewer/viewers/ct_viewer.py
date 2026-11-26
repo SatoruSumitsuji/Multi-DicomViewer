@@ -1117,7 +1117,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
-        # CPR MAP pane (edit mode): Shift+drag = rubber-band select edit points
+        # CPR MAP pane (edit mode): Shift+drag = lasso (polygon) select edit points
         # (Shift+click toggles one); a plain click drops the selection and goes
         # on as usual. A right-click with a selection → its bulk-edit menu.
         if o._cpr_map_edit_ok(self._which):
@@ -1137,8 +1137,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._meas_drag = False
                 o._cpr_sel_menu(self._which, _px, _py)
                 return
-        # Tree line ENDS (connect): Shift+click toggles an end, Shift+drag a
-        # rectangle; a right-click with ends selected → 「connect」.
+        # Tree line ENDS (connect): Shift+click toggles an end, Shift+drag a lasso
+        # polygon; a right-click with ends selected → 「connect」.
         if (o._coro_end_sel_ok(self._which) and o._draft is None
                 and not o._cpr_map_edit_ok(self._which)):
             _px, _py = e.position().x(), e.position().y()
@@ -1210,6 +1210,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 and self._owner._cpr is not None and self._which == "A"):
             self._cross = False
             self._meas_drag = False
+            # 橙なら Alt+ (user 2026-11-26): with Measure on, the view tool
+            # runs only with Alt (an interpolated section: nothing happens).
+            if (self._owner._meas_on
+                    and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)):
+                self._last = None
+                return
             self._last = e.position()
             self._cpr_page_anchor = e.position().y()
             if self._owner._tool in ("ROTATE", "SPIN"):
@@ -1377,7 +1383,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._meas_drag = bool(started)
                 self._last = e.position() if started else None
                 return
-            # idle Measure mode → fall through to the tool / crosshair setup
+            # idle Measure (no type): 橙なら Alt+ (user 2026-11-26) — the view
+            # tools and the crosshair grab need Alt too, so nothing more here.
+            if e.button() == Qt.MouseButton.LeftButton:
+                self._last = None
+                return
         self._owner._spin_prev = None        # restart SPIN wheel angle
         # A view-changing drag begins here (crosshair move/rotate OR the active
         # tool: Zoom/Move/Rotate/Spin/Thick/Paging). Snapshot for Ctrl+Z now;
@@ -1509,7 +1519,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                     and self._owner._meas_type == "point"):
                 self._owner._measure_hover(
                     self._which, e.position().x(), e.position().y())
-            elif not (self._owner._meas_on and self._owner._meas_type):
+            elif (not self._owner._meas_on
+                  or e.modifiers() & Qt.KeyboardModifier.AltModifier):
+                # Measure on → the crosshair grab needs Alt (橙なら Alt+), so
+                # its hover preview only shows with Alt held.
                 self._owner._hover_cross(
                     self._which, e.position().x(), e.position().y())
             return
@@ -11254,8 +11267,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         in 2-D native-slice mode."""
         if hasattr(self, "_cpr_epi_btn_refresh"):
             self._cpr_epi_btn_refresh()      # CPR Epi greyed without an Epi
-        measuring = getattr(self, "_meas_on", False) and bool(
-            getattr(self, "_meas_type", None))
         if getattr(self, "_frames", None):
             self._update_active_frames()     # orange frame while Alt is needed
         is2d = getattr(self, "_mode", "3D") == "2D"
@@ -12254,7 +12265,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             for _q0, _q1 in zip(_bc, _bc[1:]):
                 off_dash_segs.append((_q0, _q1))
                 off_dash_cols.append((255, 140, 0, 200))   # orange (user 2026-11-20)
-        # CPR map pane: Shift+drag rubber-band rectangle (cyan).
+        # CPR map pane: Shift+drag lasso polygon (cyan).
         _band = self._cpr_band_world_rect(key)
         if _band is not None:
             polylines.append(_band)
@@ -20888,6 +20899,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coronary_mode = False
         self._coronary_mpr_pending = False
         self._cpr_search_ring = None                  # no Auto-Track ring left
+        self._cpr_at_pending = None                   # nor 「Auto-Track 終了」
         self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
@@ -21779,6 +21791,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         gap = filled if (filled and self._cpr_at_gap()) else []
         epi = self._cpr_epi_section_2d()          # CPR row → Epi (short axis)
         mapl = self._cpr_map_plane_section_2d()    # right-pane plane line
+        slab = self._cpr_map_slab_section_2d()     # its slab faces (点線)
         forks = self._cpr_fork_label_pts("A")      # fork candidates (rings)
         srch = self._cpr_search_ring_2d()          # Auto-Track search range
         if hollow or gap or epi or mapl or forks or srch:
@@ -21811,7 +21824,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())
-        p.meas_off_dash_mapper.SetInputData(vtkPolyData())
+        if slab:                                 # the right pane's slab, 50 %
+            p.meas_off_dash_mapper.SetInputData(_colored_dashed_rgba_pd(
+                [tuple(sg) for sg in slab],
+                [self._CPR_MAP_LINE_RGB + (128,)] * len(slab)))
+        else:
+            p.meas_off_dash_mapper.SetInputData(vtkPolyData())
         p.meas_pts_edit_mapper.SetInputData(vtkPolyData())
 
     def _cpr_grab(self, sx, sy) -> bool:
@@ -21865,6 +21883,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a_at = None
         if self._cpr_autotrack_center_ok():
             a_at = menu.addAction(t("Auto-Track 開始"))
+        # 「中心を指定して続ける」 waiting but no centre to set → end it there
+        a_end = None
+        if self._cpr_autotrack_end_ok():
+            a_end = menu.addAction(t("Auto-Track 終了"))
+        if a_at is not None or a_end is not None:
             menu.addSeparator()
         # Add only BETWEEN edit points (on an edit point it would stack a
         # duplicate there); Delete only while the section sits EXACTLY on an
@@ -21880,6 +21903,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         act = menu.exec(QCursor.pos())
         if a_at is not None and act is a_at:
             self._cpr_autotrack_resume()  # from the point as it is now
+        elif a_end is not None and act is a_end:
+            self._cpr_autotrack_end()     # end here (temporary point removed)
         elif act is a_add:
             o, u, vv, _n = self._cpr_frame()
             du, dv = self._disp_to_world("A", sx, sy)
@@ -22268,8 +22293,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Measuring with a type chosen (view tools need Alt+drag): the active
         # frame is ORANGE and twice as thick (user 2026-11-25). The frames
         # always take 6 px (border + padding), so the images never shift.
-        alt = bool(getattr(self, "_meas_on", False)
-                   and getattr(self, "_meas_type", None))
+        # 橙なら Alt+ (user 2026-11-26): with Measure on the view tools ALWAYS
+        # need Alt — a type chosen or not — so the frame is orange whenever
+        # Measure is on.
+        alt = bool(getattr(self, "_meas_on", False))
         for key, f in self._frames.items():
             act = key == self._active_pane
             colr = ("#ff8c00" if alt else "#ff2020") if act else "transparent"

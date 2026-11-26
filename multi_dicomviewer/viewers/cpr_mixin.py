@@ -1522,6 +1522,25 @@ class CPRMixin:
         pane which way it goes. One 2-point segment [(du, dv), (du, dv)] in
         pane A in-plane mm, through the section; [] when there is no map MPR
         (VR on the right, or the planes are parallel)."""
+        return self._cpr_map_plane_lines_2d(0.0)
+
+    def _cpr_map_slab_section_2d(self) -> list:
+        """The right pane's SLAB (its thickness > 0) on the short-axis
+        section (user 2026-11-26): its two faces as lines parallel to the
+        plane line, ± half the thickness away — drawn dotted at 50 %."""
+        try:
+            th = float((getattr(self, "_thick", None) or {}).get("B", 0.0)
+                       or 0.0)
+        except (TypeError, ValueError):
+            th = 0.0
+        if th <= 0.05:
+            return []
+        return (self._cpr_map_plane_lines_2d(-th / 2.0)
+                + self._cpr_map_plane_lines_2d(th / 2.0))
+
+    def _cpr_map_plane_lines_2d(self, off_mm: float) -> list:
+        """The plane of the right pane shifted *off_mm* along its normal, as
+        a segment on the current short-axis section ([] if none)."""
         c = getattr(self, "_cpr", None)
         if c is None or c.get("src") != "B":
             return []
@@ -1543,7 +1562,7 @@ class CPRMixin:
         if s < 0.05:                             # (nearly) parallel planes
             return []
         w2 = w2 / s
-        d = float(nb @ (pb - o)) / s             # offset from the centre (mm)
+        d = (float(nb @ (pb - o)) + float(off_mm)) / s   # offset (mm)
         cx, cy = d * w2[0], d * w2[1]
         lx, ly = -w2[1], w2[0]                   # along the line
         half = float(c.get("half", 20.0) or 20.0) * 1.5
@@ -2110,36 +2129,63 @@ class CPRMixin:
         return had
 
     def _cpr_band_start(self, which, sx, sy, ends: bool = False) -> None:
-        """Shift+drag start. *ends*: select tree line ENDS (for connect)
-        instead of the open line's edit points."""
-        self._cpr_band = [which, float(sx), float(sy), float(sx), float(sy)]
+        """Shift+drag start: a freehand POLYGON (lasso) is drawn while
+        dragging (user 2026-11-26 — was a rectangle). *ends*: select tree
+        line ENDS (for connect) instead of the open line's edit points."""
+        self._cpr_band = [which, [(float(sx), float(sy))]]
         self._cpr_band_ends = bool(ends)
 
     def _cpr_band_move(self, sx, sy) -> None:
         b = getattr(self, "_cpr_band", None)
         if b is None:
             return
-        b[3], b[4] = float(sx), float(sy)
+        q = (float(sx), float(sy))
+        lx, ly = b[1][-1]
+        if math.hypot(q[0] - lx, q[1] - ly) < 2.0:
+            return                               # thin the lasso path
+        b[1].append(q)
         self._redraw_geom(b[0])
 
+    @staticmethod
+    def _cpr_band_click(path) -> bool:
+        """A Shift+CLICK (no real drag): the path stays within 4 px."""
+        x0, y0 = path[0]
+        return all(abs(x - x0) < 4 and abs(y - y0) < 4 for x, y in path)
+
+    @staticmethod
+    def _cpr_in_poly(path, x, y) -> bool:
+        """(x, y) inside the closed polygon *path* (even-odd rule)."""
+        n = len(path)
+        if n < 3:
+            return False
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = path[i]
+            xj, yj = path[j]
+            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+                inside = not inside
+            j = i
+        return inside
+
     def _cpr_band_end(self) -> None:
-        """Shift+drag released: select the edit points inside the rectangle
+        """Shift+drag released: select the edit points inside the polygon
         (replacing the selection). A Shift+CLICK (no real drag) toggles the
         single point under the cursor instead."""
         b = getattr(self, "_cpr_band", None)
         self._cpr_band = None
         if b is None:
             return
-        which, x0, y0, x1, y1 = b
+        which, path = b
+        click = self._cpr_band_click(path)
+        x1, y1 = path[-1]
         if getattr(self, "_cpr_band_ends", False):
             self._cpr_band_ends = False
-            if abs(x1 - x0) < 4 and abs(y1 - y0) < 4:
+            if click:
                 self._coro_ends_select(which, click=(x1, y1), toggle=True)
             else:
-                lx, hx = min(x0, x1), max(x0, x1)
-                ly, hy = min(y0, y1), max(y0, y1)
                 self._coro_ends_select(
-                    which, inside=lambda x, y: lx <= x <= hx and ly <= y <= hy)
+                    which, inside=lambda x, y: self._cpr_in_poly(path, x, y))
             for k in ("A", "B"):
                 self._redraw_geom(k)
             return
@@ -2149,7 +2195,7 @@ class CPRMixin:
             return
         pts = m.get("pts") or []
         sel = set(self._cpr_sel_get())
-        if abs(x1 - x0) < 4 and abs(y1 - y0) < 4:
+        if click:
             best, bk = 12.0, None
             for k, q in enumerate(pts):
                 qx, qy = self._cpr_screen_xy(which, q)
@@ -2159,24 +2205,21 @@ class CPRMixin:
             if bk is not None:
                 sel ^= {bk}
         else:
-            lx, hx = min(x0, x1), max(x0, x1)
-            ly, hy = min(y0, y1), max(y0, y1)
             sel = set()
             for k, q in enumerate(pts):
                 qx, qy = self._cpr_screen_xy(which, q)
-                if lx <= qx <= hx and ly <= qy <= hy:
+                if self._cpr_in_poly(path, qx, qy):
                     sel.add(k)
         self._cpr_sel_set(sel)
         self._redraw_geom(which)
 
     def _cpr_band_world_rect(self, key):
-        """The rubber-band rectangle as a closed output-plane polyline on pane
-        *key* (for drawing), or None."""
+        """The lasso polygon as a closed output-plane polyline on pane *key*
+        (for drawing), or None."""
         b = getattr(self, "_cpr_band", None)
-        if b is None or b[0] != key:
+        if b is None or b[0] != key or len(b[1]) < 2:
             return None
-        _, x0, y0, x1, y1 = b
-        cs = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        cs = list(b[1]) + [b[1][0]]
         return [tuple(self._disp_to_world(key, x, y)) for x, y in cs]
 
     #: Edit points in a low-contrast stretch of an AutoTrace (stenosis /
@@ -2528,6 +2571,7 @@ class CPRMixin:
         if getattr(self, "_cpr_fork_marks", None):
             return None                  # a fork choice is still open
         self._cpr_search_ring = None
+        self._cpr_at_pending = None      # (resumed: no 「Auto-Track 終了」)
         m = self._measures[which][mi]
         p3 = np.asarray(m.get("pts3d") or [], float)
         if len(p3) < 2:
@@ -2566,6 +2610,7 @@ class CPRMixin:
             self._cpr_set_ctrl(m, which, pts)
 
         pg_ref = {}
+        drawn = {"t": 0.0}
 
         def on_step(line_id, depth, path, course):
             pg = pg_ref.get("pg")
@@ -2576,6 +2621,14 @@ class CPRMixin:
                 if h is not None:
                     met["Q"] = h[1]            # stop: end on that line
                     return False
+            # full speed (user 2026-11-26): no pause per step, and the live
+            # view is redrawn at most every _AUTOTRACK_DRAW_S (the trace runs
+            # on meanwhile); the final line is applied after the trace anyway
+            now = time.monotonic()
+            if now - drawn["t"] < self._AUTOTRACK_DRAW_S:
+                QApplication.processEvents()
+                return not (pg is not None and pg.cancelled())
+            drawn["t"] = now
             try:
                 _apply(np.asarray(path, float)[1:])
                 if live and self._cpr is not None:
@@ -2589,9 +2642,9 @@ class CPRMixin:
                 self._refresh()
             except Exception:                            # noqa: BLE001
                 traceback.print_exc()
-            # a short pause per step so it can be watched (and stopped)
+            QApplication.processEvents()       # draw + let 停止 be pressed
             t_end = time.monotonic() + self._AUTOTRACK_STEP_S
-            while time.monotonic() < t_end:
+            while time.monotonic() < t_end:    # (0 = no pause: full speed)
                 QApplication.processEvents()
                 if pg is not None and pg.cancelled():
                     break
@@ -2718,6 +2771,8 @@ class CPRMixin:
                 # the true lumen centre in the left pane moves it there and
                 # Auto-Track goes on
                 self._meas_record(which, before_probe)
+                self._cpr_at_pending = {"which": which, "mi": mi,
+                                        "keep": keep}
                 self._cpr_autotrack_hint(t(
                     "左ペインで内腔の中心を左クリックで調整 → 右クリック「Auto-Track 開始」"))
             else:
@@ -2768,6 +2823,45 @@ class CPRMixin:
             return False
         k = self._cpr_at_ctrl()
         return k is not None and k == len(m["pts3d"]) - 1
+
+    def _cpr_autotrack_end_ok(self) -> bool:
+        """「中心を指定して続ける」 is waiting (the stop-section point is the
+        line's temporary distal edit point) → 「Auto-Track 終了」."""
+        return (getattr(self, "_cpr_at_pending", None) is not None
+                and getattr(self, "_cpr", None) is not None)
+
+    def _cpr_autotrack_end(self) -> bool:
+        """Right-click ▸ 「Auto-Track 終了」 (user 2026-11-26): no lumen centre
+        to set on the stop section → end Auto-Track there. The temporary
+        stop-section point is removed (one undo step) — unless the line was
+        edited since, then only the search range goes — and the hint too."""
+        pd = getattr(self, "_cpr_at_pending", None)
+        self._cpr_at_pending = None
+        if pd is None:
+            return False
+        self._cpr_search_ring = None
+        which, mi, keep = pd["which"], pd["mi"], pd["keep"]
+        try:
+            m = self._measures[which][mi]
+        except (KeyError, IndexError, TypeError):
+            m = None
+        p3 = [list(map(float, q)) for q in ((m or {}).get("pts3d") or [])]
+        untouched = (keep and len(p3) == len(keep) + 1 and np.allclose(
+            np.asarray(p3[:-1], float), np.asarray(keep, float), atol=1e-6))
+        if m is not None and untouched:
+            before = self._meas_pane_snap(which)
+            self._cpr_autotrack_probe_end(which, mi, m, keep)
+            self._meas_record(which, before)
+        else:
+            try:
+                self._refresh()
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            self.window().statusBar().clearMessage()
+        except Exception:                                # noqa: BLE001
+            pass
+        return True
 
     def _cpr_autotrack_resume(self) -> dict | None:
         """Right-click ▸ 「Auto-Track 開始」: Auto-Track goes on from the
@@ -2880,7 +2974,8 @@ class CPRMixin:
             import traceback
             traceback.print_exc()
 
-    _AUTOTRACK_STEP_S = 0.35          # pause per Auto-Track step (watchable)
+    _AUTOTRACK_STEP_S = 0.0           # pause per Auto-Track step (full speed)
+    _AUTOTRACK_DRAW_S = 0.15          # live view redrawn at most this often
 
     def _cpr_autotrack_view(self, which, P, course) -> None:
         """Auto-Track live view: the long-axis pane (the line's map pane,

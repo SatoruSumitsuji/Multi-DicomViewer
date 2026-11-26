@@ -162,6 +162,7 @@
   "Auto-Trace中…": "Auto-Trace en curso…",
   "Auto-Track": "Auto-Track",
   "Auto-Track でエラーが発生しました: {e}": "Auto-Track falló con un error: {e}",
+  "Auto-Track 終了": "Terminar Auto-Track",
   "Auto-Track 開始": "Iniciar Auto-Track",
   "Auto-Track: 準備中…": "Auto-Track: preparando…",
   "Auto-page through the slices head → feet (loops; click again to stop). Keys: D = play / ×2 speed, S = stop": "Avance automático por los cortes de cabeza → pies (en bucle; clic de nuevo para detener). Teclas: D = reproducir / velocidad ×2, S = detener",
