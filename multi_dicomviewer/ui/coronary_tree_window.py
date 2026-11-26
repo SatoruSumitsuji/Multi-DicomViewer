@@ -993,8 +993,9 @@ class CoronaryTreeWindow(SnapDock):
         if not self._same_ctrl(v.ctrl, ctrl_arr):
             v.fin_traced = False
         cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
-        v.points = cl.points
-        v.ctrl = ctrl_arr
+        # the side branches' junctions follow (anchors) and the line keeps
+        # the tree's proximal → distal (user 2026-11-27)
+        b["tree"].replace_points(vid, cl.points, ctrl_arr)
         if path:
             b["paths"][vid] = path
         self._populate()
@@ -1140,9 +1141,7 @@ class CoronaryTreeWindow(SnapDock):
                 cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
             except Exception:                                # noqa: BLE001
                 continue
-            v = tree.vessels[vid]
-            v.points = cl.points
-            v.ctrl = ctrl_arr
+            tree.replace_points(vid, cl.points, ctrl_arr)  # children follow
             b["paths"][vid] = path
             updated_vids.add(vid)
         # 5b) removals: orphan the DIRECT children (→ unconnected), then drop. A
@@ -1167,18 +1166,10 @@ class CoronaryTreeWindow(SnapDock):
             tree.add_vessel(new_vid, safe, "branch", cl.points, ctrl=ctrl_arr)
             self._apply_cpr_meta(tree.vessels[new_vid], fd.get("data"))
             b["paths"][new_vid] = fd["path"]
-        # 5d) a child whose PARENT geometry changed: re-derive its junction (index
-        #     into the parent's resampled points) by snapping the child's proximal
-        #     endpoint onto the new parent line — no reversal (keep orientation).
-        for cv in tree.vessels.values():
-            if cv.parent in updated_vids and cv.parent in tree.vessels:
-                try:
-                    p = tree.vessels[cv.parent]
-                    if p.n and cv.n:
-                        d = np.linalg.norm(p.points - cv.points[0], axis=1)
-                        cv.junction = int(np.argmin(d))
-                except Exception:                            # noqa: BLE001
-                    pass
+        # 5d) a child whose PARENT geometry changed: its junction already
+        #     followed its connection point (replace_points, user 2026-11-27 —
+        #     it used to snap the child's FIRST point, its distal end when
+        #     the child was stored distal → proximal).
         self._populate()
         self.treeChanged.emit()
         if self._overlay_on:
@@ -3624,6 +3615,12 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("線の端では分離できません。もう少し内側を右クリック"
                          "してください。"))
             return ""
+        # A CONNECTED line stored distal → proximal: turn it proximal →
+        # distal first (its side branches follow), so the part that keeps the
+        # vessel is really the proximal one (user 2026-11-27).
+        if v.parent is not None and tree.runs_reversed(vid):
+            tree.reverse_vessel(vid)
+            idx = v.n - 1 - idx
         ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
                           else v.points, float)
         # A small GAP at the cut (user 2026-11-25: the two lines looked like
@@ -3668,6 +3665,7 @@ class CoronaryTreeWindow(SnapDock):
         movers = [c for c, cv in tree.vessels.items()
                   if cv.parent == vid and cv.junction is not None
                   and int(cv.junction) > idx]
+        mv_anchor = {c: tree.anchor(c) for c in movers}
         self._set_vessel_ctrl(tree, vid, np.asarray(prox, float))
         v.ctrl_manual = None
         v.fin_traced = False
@@ -3682,8 +3680,11 @@ class CoronaryTreeWindow(SnapDock):
         for c in movers:
             cv = tree.vessels[c]
             cv.parent = new_vid
-            cv.junction = int(np.argmin(
-                np.linalg.norm(nv.points - cv.points[0], axis=1)))
+            A = mv_anchor.get(c)
+            if A is None:
+                A = cv.points[0]
+            cv.junction = int(np.argmin(np.linalg.norm(nv.points - A, axis=1)))
+            cv.anchor = None                     # re-derived from the junction
         if vid in b["hidden"]:
             b["hidden"].add(new_vid)
         old = self._read_cpr(path) if path else None
@@ -3762,11 +3763,18 @@ class CoronaryTreeWindow(SnapDock):
             second = second[1:]
         merged = np.asarray(first + bridge + second, float)
         kids_d = [c for c, cv in tree.vessels.items() if cv.parent == d]
-        for c in kids_d:
-            tree.vessels[c].parent = k
+        a_d = {c: tree.anchor(c) for c in kids_d}    # their points on D (3-D)
         if vk.parent == d:                        # K hung on D → D's place
             vk.parent, vk.junction = vd.parent, vd.junction
         self._set_vessel_ctrl(tree, k, merged)    # re-snaps every child of K
+        for c in kids_d:                          # D's branches → K, same place
+            cv = tree.vessels[c]
+            cv.parent = k
+            A = a_d.get(c)
+            if A is not None and vk.n:
+                cv.junction = int(np.argmin(np.linalg.norm(vk.points - A,
+                                                           axis=1)))
+            tree._set_anchor(c)
         vk.auto_traced = bool(vk.auto_traced and vd.auto_traced)
         vk.fin_traced = False
         vk.ctrl_manual = None
@@ -4180,14 +4188,12 @@ class CoronaryTreeWindow(SnapDock):
     def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
         """Replace a vessel's centreline (ctrl + resampled points) and re-snap the
         junction of each direct child onto the new line."""
-        v = tree.vessels[vid]
         ctrl = np.asarray(ctrl, float)
-        v.ctrl = ctrl
-        v.points = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM).points
-        for cv in tree.vessels.values():
-            if cv.parent == vid and cv.n and v.n:
-                d = np.linalg.norm(v.points - cv.points[0], axis=1)
-                cv.junction = int(np.argmin(d))
+        # the ctrl is used AS GIVEN (the caller chose its direction, e.g.
+        # 一括描出 = proximal → distal); the children follow their anchors
+        tree.replace_points(
+            vid, CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM).points,
+            ctrl, keep_direction=False)
 
     def _batch_auto_trace(self) -> None:
         """一括AutoTrace: auto-trace every target line in turn (foreground; the
@@ -4847,15 +4853,18 @@ class CoronaryTreeWindow(SnapDock):
             cur = v.ctrl
             if cur is not None:
                 cur_arr = np.asarray(cur, float)
-                if cur_arr.shape == ctrl_arr.shape \
-                        and np.allclose(cur_arr, ctrl_arr, atol=1e-3):
+                if cur_arr.shape == ctrl_arr.shape and (
+                        np.allclose(cur_arr, ctrl_arr, atol=1e-3)
+                        # the same line turned round by 接続 (the file keeps
+                        # the drawn order): not a change (user 2026-11-27)
+                        or np.allclose(cur_arr[::-1], ctrl_arr, atol=1e-3)):
                     continue
             try:
                 cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
             except Exception:                            # noqa: BLE001
                 continue
-            v.points = cl.points
-            v.ctrl = ctrl_arr
+            # keep the tree's direction; the side branches' junctions follow
+            self._tree.replace_points(vid, cl.points, ctrl_arr)
             self._bundle()["paths"][vid] = cand          # remember its .cpr.json
             refreshed.append(name)
         return refreshed

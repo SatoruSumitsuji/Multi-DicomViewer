@@ -78,6 +78,13 @@ class Vessel:
     fix_name: str = ""
     #: hand-placed points the auto trace came from (undo of 一括AutoTrace)
     ctrl_manual: np.ndarray | None = None
+    #: the connection point ON THE PARENT (3-D, mm) — set when connected
+    #: (user 2026-11-27): the drawn direction and the connected proximal /
+    #: distal are kept apart. The proximal end is the end at this point, and
+    #: the junction index is re-snapped to it whenever the parent's line is
+    #: replaced / reversed (an index alone went stale). Not saved: it is
+    #: derived again from parent + junction on load.
+    anchor: np.ndarray | None = None
 
     def __post_init__(self):
         self.points = np.asarray(self.points, float).reshape(-1, 3)
@@ -85,6 +92,8 @@ class Vessel:
             self.ctrl = np.asarray(self.ctrl, float).reshape(-1, 3)
         if self.ctrl_manual is not None:
             self.ctrl_manual = np.asarray(self.ctrl_manual, float).reshape(-1, 3)
+        if self.anchor is not None:
+            self.anchor = np.asarray(self.anchor, float).reshape(3)
 
     @property
     def n(self) -> int:
@@ -138,6 +147,7 @@ class CoronaryTree:
                     "parent": parent, "junction": int(jidx)}
         self.vessels[vid] = Vessel(vid=vid, name=name, role="branch",
                                    points=pts, parent=parent, junction=int(jidx))
+        self._set_anchor(vid)
         return {"ok": True, "parent": parent, "junction": int(jidx),
                 "dist_mm": float(dist)}
 
@@ -163,6 +173,100 @@ class CoronaryTree:
         v.parent = parent
         v.junction = int(junction)
         v.role = "branch"
+        self._set_anchor(vid)
+
+    # ------------------------------------------- connection anchor (3-D)
+    #: an anchor this far (mm) from both ends of its branch is not trusted
+    #: (a stale junction index) → derived again from the geometry
+    _ANCHOR_TRUST_MM = 6.0
+
+    def _set_anchor(self, vid: str) -> None:
+        """Record the connection point on the parent from parent + junction."""
+        v = self.vessels.get(vid)
+        p = self.vessels.get(v.parent) if (v is not None and v.parent) else None
+        if p is None or p.n == 0 or v.junction is None:
+            if v is not None:
+                v.anchor = None
+            return
+        j = max(0, min(int(v.junction), p.n - 1))
+        v.junction = j
+        v.anchor = np.asarray(p.points[j], float).copy()
+        v._akey = (v.parent, j)
+
+    def anchor(self, vid: str):
+        """The connection point of branch *vid* on its parent (3-D), or None.
+        Derived (once) from parent + junction; a junction index that has gone
+        stale (its point far from BOTH ends of the branch) is replaced by the
+        parent sample nearest the branch's nearer end."""
+        v = self.vessels.get(vid)
+        p = self.vessels.get(v.parent) if (v is not None and v.parent) else None
+        if p is None or p.n == 0 or v.n == 0:
+            return None
+        if v.anchor is not None and getattr(v, "_akey", None) == (
+                v.parent, v.junction):
+            return v.anchor
+        ends = (np.asarray(v.points[0], float), np.asarray(v.points[-1], float))
+        if v.junction is not None and 0 <= int(v.junction) < p.n:
+            A = np.asarray(p.points[int(v.junction)], float)
+            if min(float(np.linalg.norm(e - A)) for e in ends) \
+                    <= self._ANCHOR_TRUST_MM:
+                v.anchor = A.copy()
+                v._akey = (v.parent, v.junction)
+                return v.anchor
+        best = None
+        for e in ends:
+            d = np.linalg.norm(p.points - e, axis=1)
+            j = int(np.argmin(d))
+            if best is None or d[j] < best[0]:
+                best = (float(d[j]), j)
+        v.junction = best[1]
+        v.anchor = np.asarray(p.points[best[1]], float).copy()
+        v._akey = (v.parent, v.junction)
+        return v.anchor
+
+    def _resnap_children(self, vid: str, anchors: dict) -> None:
+        """After *vid*'s points changed: each direct child's junction = the
+        new parent sample nearest its (pre-change) anchor."""
+        p = self.vessels.get(vid)
+        if p is None or p.n == 0:
+            return
+        for c, A in anchors.items():
+            cv = self.vessels.get(c)
+            if cv is None or cv.parent != vid or A is None:
+                continue
+            j = int(np.argmin(np.linalg.norm(p.points - A, axis=1)))
+            cv.junction = j
+            cv.anchor = np.asarray(p.points[j], float).copy()
+            cv._akey = (cv.parent, j)
+
+    def replace_points(self, vid: str, points, ctrl=None,
+                       keep_direction: bool = True) -> bool:
+        """Replace vessel *vid*'s line (re-edit / Auto-Track / folder update)
+        WITHOUT breaking the tree: the children's junctions follow their
+        anchors, and (*keep_direction*) the new line keeps the direction the
+        tree had — a re-edit saved in the drawn order (or a Resume from the
+        start, which reverses it) no longer flips a connected line. Returns
+        True when the new line was reversed to keep the direction."""
+        v = self.vessels[vid]
+        anchors = {c: self.anchor(c) for c in self.children(vid)}
+        self.anchor(vid)                         # its own (on its parent)
+        pts = np.asarray(points, float).reshape(-1, 3)
+        ct = None if ctrl is None else np.asarray(ctrl, float).reshape(-1, 3)
+        flipped = False
+        if keep_direction and v.n >= 2 and len(pts) >= 2:
+            o0, o1 = v.points[0], v.points[-1]
+            same = (np.linalg.norm(pts[0] - o0) + np.linalg.norm(pts[-1] - o1))
+            rev = (np.linalg.norm(pts[0] - o1) + np.linalg.norm(pts[-1] - o0))
+            if rev < same:
+                pts = pts[::-1].copy()
+                if ct is not None:
+                    ct = ct[::-1].copy()
+                flipped = True
+        v.points = pts
+        if ctrl is not None:
+            v.ctrl = ct
+        self._resnap_children(vid, anchors)
+        return flipped
 
     def _nearest_sample(self, xyz):
         """(vid, sample_index, dist_mm) of the nearest sample across all vessels."""
@@ -215,9 +319,12 @@ class CoronaryTree:
     def reverse_vessel(self, vid: str) -> None:
         """Flip a vessel's proximal↔distal direction (its points and ctrl)."""
         v = self.vessels[vid]
+        anchors = {c: self.anchor(c) for c in self.children(vid)}
+        self.anchor(vid)
         v.points = v.points[::-1].copy()
         if v.ctrl is not None:
             v.ctrl = v.ctrl[::-1].copy()
+        self._resnap_children(vid, anchors)      # their junctions follow
 
     def _nearest_endpoint_to(self, vid: str, targets):
         """Nearest attachment of vessel *vid*'s TWO endpoints to any vessel in
@@ -226,7 +333,7 @@ class CoronaryTree:
         v = self.vessels[vid]
         if v.n < 2:
             return None
-        best = None
+        per_end = {}
         for end, xyz in (("first", v.points[0]), ("last", v.points[-1])):
             xyz = np.asarray(xyz, float)
             for pvid in targets:
@@ -235,10 +342,23 @@ class CoronaryTree:
                 p = self.vessels[pvid]
                 d = np.linalg.norm(p.points - xyz, axis=1)
                 j = int(np.argmin(d))
-                if best is None or d[j] < best["dist"]:
-                    best = {"parent": pvid, "junction": j,
-                            "dist": float(d[j]), "end": end}
-        return best
+                b = per_end.get(end)
+                if b is None or d[j] < b["dist"]:
+                    per_end[end] = {"parent": pvid, "junction": j,
+                                    "dist": float(d[j]), "end": end}
+        f, l_ = per_end.get("first"), per_end.get("last")
+        if f is None or l_ is None:
+            return f or l_
+        # Both ends near the tree: a line is drawn FROM its parent (user
+        # 2026-11-27, proximal → distal), so the drawing start wins unless
+        # the other end is clearly (> 1.5 mm) closer.
+        if f["dist"] <= l_["dist"] + self._START_PREF_MM:
+            return f
+        return l_
+
+    #: connect: the drawing start is preferred unless the other end is
+    #: this much (mm) nearer the tree
+    _START_PREF_MM = 1.5
 
     def connect_all(self, snap_tol_mm: float = 3.0) -> dict:
         """Grow the tree by proximity: roots anchor it; each unconnected branch
@@ -263,6 +383,7 @@ class CoronaryTree:
                     v = self.vessels[vid]
                     v.parent = best["parent"]
                     v.junction = int(best["junction"])
+                    self._set_anchor(vid)
                     connected.add(vid)
                     pending.remove(vid)
                     newly.append(vid)
@@ -358,9 +479,9 @@ class CoronaryTree:
         p = self.vessels.get(v.parent) if v.parent else None
         if p is None or p.n < 1:
             return True
-        j = int(v.junction) if v.junction is not None else int(np.argmin(
-            np.linalg.norm(p.points - v.points[0], axis=1)))
-        J = np.asarray(p.points[max(0, min(j, p.n - 1))], float)
+        J = self.anchor(vid)                     # the connection point (3-D)
+        if J is None:
+            return False
         d0 = float(np.linalg.norm(np.asarray(v.points[0], float) - J))
         d1 = float(np.linalg.norm(np.asarray(v.points[-1], float) - J))
         return d1 < d0
