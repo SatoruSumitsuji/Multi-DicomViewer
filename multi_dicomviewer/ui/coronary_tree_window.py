@@ -1744,9 +1744,12 @@ class CoronaryTreeWindow(SnapDock):
                     self._tree_w.addTopLevelItem(lg)
                 else:
                     parent.addChild(lg)
+                # with their own lines below them (user 2026-11-26: a
+                # separate / Auto-Track branch hung on an unconnected line
+                # was missing from the list)
                 for vid in tree.vessels:
                     if vid in loose:
-                        lg.addChild(self._make_item(vid))
+                        add_recursive(vid, lg)
         self._active_uid = saved_active
         self._tree_w.expandAll()
         self._tree_w.blockSignals(False)
