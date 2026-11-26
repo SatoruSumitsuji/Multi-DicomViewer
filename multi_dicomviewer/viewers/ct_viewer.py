@@ -1177,6 +1177,18 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
+        # Short-axis: a press ON the right pane's plane line (水色) turns it —
+        # and the right pane round the course (user 2026-11-26; 橙 = Alt+)
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._cpr is not None and self._which == "A"
+                and self._owner._cpr_mapline_grab(
+                    e.position().x(), e.position().y(),
+                    alt=bool(e.modifiers()
+                             & Qt.KeyboardModifier.AltModifier))):
+            self._last = e.position()
+            self._cross = False
+            self._meas_drag = False
+            return
         # Short-axis (CPR) pane in EDIT mode (Measure on, no draw type selected):
         # a plain left-click MOVES the current section's edit (control) point to
         # the clicked in-plane spot — "click where you want it", no need to grab
@@ -1446,6 +1458,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._owner._cpr_drag_move(
                     e.position().x(), e.position().y())
                 return
+            if self._owner._cpr_mapline_prev is not None:   # turning the line
+                self._owner._cpr_mapline_move(
+                    e.position().x(), e.position().y())
+                return
             _tool = self._owner._tool
             if _tool in ("ROTATE", "SPIN"):
                 self._owner._cpr_rot_move(e.position().x(), e.position().y())
@@ -1615,6 +1631,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             return
         if self._owner._cpr_drag is not None:
             self._owner._cpr_drag_end()          # rebuild centreline on release
+            self._last = None
+            return
+        if self._owner._cpr_mapline_prev is not None:
+            self._owner._cpr_mapline_end()
             self._last = None
             return
         if self._owner._cpr_rot_prev is not None:

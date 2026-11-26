@@ -3889,6 +3889,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                         self._last = (x, y)
                         self._meas_drag = False
                     return
+                # the right pane's plane line (水色): a press ON it turns it
+                # and the right pane round the course (橙 = Alt+)
+                if self._cpr_mapline_grab(x, y, alt=bool(_alt)):
+                    self._last = (x, y)
+                    self._meas_drag = False
+                    return
                 # EDIT mode: reaching here means idle Measure (no draw type /
                 # handle grabbed — the measure block above fell through) and no
                 # Alt. A plain left-click MOVES the current section's edit
@@ -4078,6 +4084,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if self._cpr_drag is not None:
                 self._cpr_drag_move(x, y)
                 return
+            if self._cpr_mapline_prev is not None:     # turning the line
+                self._cpr_mapline_move(x, y)
+                return
             if self._tool in ("ROTATE", "SPIN"):
                 self._cpr_rot_move(x, y)
                 return
@@ -4187,6 +4196,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._cpr is not None:
             self._cpr_drag_end()
             self._cpr_rot_end()
+            self._cpr_mapline_end()
         # Commit an intersection recentre: the point held under the cursor during
         # the drag jumps to the image centre in both panes (done on RELEASE).
         if (self._cross_grab and self._cross_mode == "center"

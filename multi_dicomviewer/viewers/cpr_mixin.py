@@ -1549,6 +1549,121 @@ class CPRMixin:
         return (self._cpr_map_plane_lines_2d(-th / 2.0)
                 + self._cpr_map_plane_lines_2d(th / 2.0))
 
+    # ---- drag the right pane's plane line on the short axis (user 2026-11-26)
+    _CPR_MAPLINE_PX = 6.0             # grab distance to the line (px)
+    _cpr_mapline_prev = None          # cursor angle while turning (rad)
+    _cpr_mapline_piv = (0.0, 0.0)     # the pivot: the line's foot (du, dv)
+
+    def _cpr_scr_off(self, sx, sy):
+        """Pane-A screen px → the section's in-plane offset (du, dv mm)."""
+        if hasattr(self, "_cpr_screen_to_offset"):
+            return self._cpr_screen_to_offset(sx, sy)
+        return self._disp_to_world("A", sx, sy)
+
+    def _cpr_mapline_hit(self, sx, sy) -> bool:
+        """The press is ON the right pane's plane line (within a few px)."""
+        segs = self._cpr_map_plane_section_2d()
+        if not segs:
+            return False
+        try:
+            x, y = (float(q) for q in self._cpr_scr_off(sx, sy))
+            x2, y2 = (float(q) for q in self._cpr_scr_off(
+                sx + self._CPR_MAPLINE_PX, sy))
+        except Exception:                        # noqa: BLE001
+            return False
+        tol = math.hypot(x2 - x, y2 - y)
+        (ax, ay), (bx, by) = segs[0]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        f = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, (
+            (x - ax) * dx + (y - ay) * dy) / L2))
+        return math.hypot(x - (ax + f * dx), y - (ay + f * dy)) <= tol
+
+    def _cpr_mapline_grab(self, sx, sy, alt: bool = False) -> bool:
+        """A left-press on the plane line starts turning it (橙 = Measure on:
+        only with Alt). True = grabbed."""
+        if getattr(self, "_cpr", None) is None:
+            return False
+        if getattr(self, "_meas_on", False) and not alt:
+            return False
+        if not self._cpr_mapline_hit(sx, sy):
+            return False
+        # the pivot: the line's point nearest the section centre (it turns
+        # where it is shown — paged / an edit point moved: off the centre)
+        (ax, ay), (bx, by) = self._cpr_map_plane_section_2d()[0]
+        self._cpr_mapline_piv = ((ax + bx) / 2.0, (ay + by) / 2.0)
+        x, y = (float(q) for q in self._cpr_scr_off(sx, sy))
+        px, py = self._cpr_mapline_piv
+        self._cpr_mapline_prev = math.atan2(y - py, x - px)
+        return True
+
+    def _cpr_mapline_move(self, sx, sy) -> None:
+        """Dragging the line: it turns round the section centre with the
+        cursor and the right pane turns with it (round the course)."""
+        prev = self._cpr_mapline_prev
+        if prev is None or getattr(self, "_cpr", None) is None:
+            return
+        x, y = (float(q) for q in self._cpr_scr_off(sx, sy))
+        px, py = self._cpr_mapline_piv
+        if math.hypot(x - px, y - py) < 0.3:        # too near the pivot
+            return
+        a = math.atan2(y - py, x - px)
+        d = (a - prev + math.pi) % (2.0 * math.pi) - math.pi
+        self._cpr_mapline_prev = a
+        if abs(d) > 1e-6:
+            self._cpr_map_turn(d, self._cpr_mapline_piv)
+
+    def _cpr_mapline_end(self) -> None:
+        self._cpr_mapline_prev = None
+
+    def _cpr_map_turn(self, dang: float, piv=(0.0, 0.0)) -> bool:
+        """Turn the right (long-axis) pane by *dang* rad round the course at
+        the current section: its plane holds the section normal (the course)
+        and the plane line, turned by *dang* in the section round *piv* (du,
+        dv; the line's foot); the pane passes through / is centred there."""
+        c = getattr(self, "_cpr", None)
+        if c is None or c.get("src") != "B" or not hasattr(self, "_frame"):
+            return False
+        try:
+            o, u, vv, n = (np.asarray(q, float) for q in self._cpr_frame())
+            u0, _v0, nb = (np.asarray(q, float) for q in self._axes_for("B"))
+        except Exception:                        # noqa: BLE001
+            return False
+        n = n / (float(np.linalg.norm(n)) or 1.0)
+        w2 = np.array([float(nb @ u), float(nb @ vv)])
+        s = float(np.hypot(*w2))
+        if s < 0.05:
+            return False
+        lx, ly = -w2[1] / s, w2[0] / s           # along the line (section)
+        ca, sa = math.cos(dang), math.sin(dang)
+        lx, ly = lx * ca - ly * sa, lx * sa + ly * ca
+        L = lx * u + ly * vv
+        nb1 = np.cross(n, L)
+        nn = float(np.linalg.norm(nb1))
+        if nn < 1e-9:
+            return False
+        nb1 = nb1 / nn
+        if float(nb1 @ nb) < 0.0:
+            nb1 = -nb1
+        u1 = n if float(n @ u0) >= 0.0 else -n
+        v1 = np.cross(nb1, u1)
+        self._frame["B"] = self._ortho(u1, v1)
+        if hasattr(self, "_cross_ang"):
+            self._cross_ang["B"] = 0.0
+        F = o + float(piv[0]) * u + float(piv[1]) * vv
+        self._center = F.copy()
+        if hasattr(self, "_cpr_recenter_map_pane"):
+            self._cpr_recenter_map_pane("B", F)
+        else:
+            self._pc["B"] = F.copy()
+        for k in ("A", "B"):
+            try:
+                self._redraw_meas(k)
+            except Exception:                    # noqa: BLE001
+                pass
+        self._refresh()
+        return True
+
     def _cpr_map_plane_lines_2d(self, off_mm: float) -> list:
         """The plane of the right pane shifted *off_mm* along its normal, as
         a segment on the current short-axis section ([] if none)."""

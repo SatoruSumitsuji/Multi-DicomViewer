@@ -3319,34 +3319,83 @@ class CoronaryTreeWindow(SnapDock):
         return ("file" if ch is b_file else "list" if ch is b_list
                 else None)
 
+    def _ask_name_clash(self, fname: str, can_overwrite: bool = True):
+        """A rename onto a name whose file exists (user 2026-11-26):
+        「上書き」 → "overwrite" (default; the old file goes to _deleted),
+        「-1 を付ける」 → "suffix", 「変更しない」 → None. *can_overwrite* False
+        (another line uses that file): no 上書き."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(t("ファイル名更新"))
+        box.setText(t("同名ファイルがあります：{a}", a=fname))
+        if can_overwrite:
+            box.setInformativeText(t(
+                "「上書き」は今あるファイルを同じフォルダの _deleted "
+                "フォルダへ移してから保存します（手で戻せます）。"))
+        else:
+            box.setInformativeText(t(
+                "そのファイルは別の CPR 線が使っているので上書きできません。"))
+        b_over = (box.addButton(t("上書き"),
+                                QMessageBox.ButtonRole.AcceptRole)
+                  if can_overwrite else None)
+        b_sfx = box.addButton(t("「-1」などを付けた名前にする"),
+                              QMessageBox.ButtonRole.ActionRole)
+        b_no = box.addButton(t("変更しない"),
+                             QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_over if b_over is not None else b_sfx)
+        box.setEscapeButton(b_no)
+        box.exec()
+        ch = box.clickedButton()
+        if b_over is not None and ch is b_over:
+            return "overwrite"
+        return "suffix" if ch is b_sfx else None
+
+    def _file_owner(self, path: str):
+        """The vessel id (any CT) whose CPR file is *path*, else None."""
+        key = os.path.normcase(os.path.abspath(path))
+        bundles = getattr(self, "_by_uid", None) or {"": self._bundle()}
+        for bb in bundles.values():
+            for vid, p in (bb.get("paths") or {}).items():
+                if p and os.path.normcase(os.path.abspath(p)) == key:
+                    return vid
+        return None
+
+    def _retire_path(self, p: str) -> bool:
+        """Move file *p* into the DELETED_DIR beside it (a name already
+        there gets a time stamp). True when moved."""
+        import datetime
+        import shutil
+        dd = os.path.join(os.path.dirname(p), self.DELETED_DIR)
+        dst = os.path.join(dd, os.path.basename(p))
+        try:
+            os.makedirs(dd, exist_ok=True)
+            if os.path.exists(dst):
+                stem = os.path.basename(p)[:-len(".cpr.json")] \
+                    if p.lower().endswith(".cpr.json") \
+                    else os.path.splitext(os.path.basename(p))[0]
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                dst = os.path.join(dd, f"{stem}_{ts}.cpr.json")
+                k = 2
+                while os.path.exists(dst):
+                    dst = os.path.join(dd, f"{stem}_{ts}_{k}.cpr.json")
+                    k += 1
+            shutil.move(p, dst)
+            return True
+        except OSError:
+            return False
+
     def _retire_cpr_files(self, b, vids) -> int:
         """Move the CPR files of *vids* (bundle *b*) into the DELETED_DIR
         beside each (a name already there gets a time stamp). Returns how
         many were moved; a failure is reported, the rest goes on."""
-        import datetime
-        import shutil
         moved, failed = 0, []
         for vid in vids:
             p = (b.get("paths") or {}).get(vid)
             if not p or not os.path.isfile(p):
                 continue
-            dd = os.path.join(os.path.dirname(p), self.DELETED_DIR)
-            dst = os.path.join(dd, os.path.basename(p))
-            try:
-                os.makedirs(dd, exist_ok=True)
-                if os.path.exists(dst):
-                    stem = os.path.basename(p)[:-len(".cpr.json")] \
-                        if p.lower().endswith(".cpr.json") \
-                        else os.path.splitext(os.path.basename(p))[0]
-                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    dst = os.path.join(dd, f"{stem}_{ts}.cpr.json")
-                    k = 2
-                    while os.path.exists(dst):
-                        dst = os.path.join(dd, f"{stem}_{ts}_{k}.cpr.json")
-                        k += 1
-                shutil.move(p, dst)
+            if self._retire_path(p):
                 moved += 1
-            except OSError:
+            else:
                 failed.append(os.path.basename(p))
         if failed:
             self._warn(t("次のファイルを _deleted へ移せませんでした:\n{f}",
@@ -4443,6 +4492,8 @@ class CoronaryTreeWindow(SnapDock):
                     new_names.setdefault(nm.lower(), []).append(ovid)
         dups = {k for k, vs in new_names.items() if len(vs) > 1}
         final = []
+        over = set()                             # dst files to put away first
+        sfx_base = {}                            # vid → base with "-k" added
         for vid, old, new, path in plan:
             if new.lower() in dups:
                 problems.append(t("{a}: 名前が重複", a=new))
@@ -4453,8 +4504,31 @@ class CoronaryTreeWindow(SnapDock):
             if old == new and same:
                 continue                         # already named so
             if os.path.exists(dst) and not same:
-                problems.append(t("{a}: 同名ファイルが既にある", a=new + ".cpr.json"))
-                continue
+                # a file of that name is there (user 2026-11-26): 上書き /
+                # 「-1」 を付ける / 変更しない — 上書き only when no line uses it
+                owner = self._file_owner(dst)
+                ch = self._ask_name_clash(new + ".cpr.json",
+                                          can_overwrite=owner is None)
+                if ch is None:
+                    problems.append(t("{a}: 同名ファイルが既にある",
+                                      a=new + ".cpr.json"))
+                    continue
+                if ch == "overwrite":
+                    over.add(os.path.normcase(os.path.abspath(dst)))
+                else:
+                    base_ = self._rename_base(tree.vessels[vid], fix)
+                    k = 1
+                    while True:
+                        cand = f"{base_}-{k}{fix}"
+                        dst = os.path.join(os.path.dirname(path),
+                                           cand + ".cpr.json")
+                        if not os.path.exists(dst) \
+                                and cand.lower() not in new_names:
+                            break
+                        k += 1
+                    new_names.setdefault(cand.lower(), []).append(vid)
+                    new = cand
+                    sfx_base[vid] = f"{base_}-{k}"
             final.append((vid, old, new, path, dst))
         if not final:
             if not ask:
@@ -4468,7 +4542,10 @@ class CoronaryTreeWindow(SnapDock):
                 msg += "\n" + "\n".join(problems[:15])
             self._warn(msg)
             return
-        lines = [f"{o} → {n}" for _v, o, n, _p, _d in final]
+        lines = [f"{o} → {n}" + (
+            " " + t("（上書き）")
+            if os.path.normcase(os.path.abspath(d)) in over else "")
+            for _v, o, n, _p, d in final]
         msg = t("次の {n} 本のファイル名を更新します：", n=len(final)) + "\n" \
             + "\n".join(lines[:25]) + ("\n…" if len(lines) > 25 else "")
         if problems:
@@ -4488,7 +4565,11 @@ class CoronaryTreeWindow(SnapDock):
                 problems.append(t("{a}: 読めません", a=os.path.basename(path)))
                 continue
             v = tree.vessels[vid]
-            base = self._rename_base(v, fix)
+            base = sfx_base.get(vid) or self._rename_base(v, fix)
+            if os.path.normcase(os.path.abspath(dst)) in over \
+                    and os.path.isfile(dst) and not self._retire_path(dst):
+                problems.append(t("{a}: 保存失敗", a=os.path.basename(dst)))
+                continue                         # the old one could not go
             d["detail_name"] = base
             if fix:
                 d["fix_name"] = fix
