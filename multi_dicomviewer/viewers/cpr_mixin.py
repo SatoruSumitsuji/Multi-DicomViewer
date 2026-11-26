@@ -2026,11 +2026,29 @@ class CPRMixin:
             self._refresh()
 
     # ---- 選択を解除 (Deselect): leave the edit of a CPR line ------------------
+    def _cpr_desel_light_ok(self, which, mi) -> bool:
+        """A CPR line showing ALL its edit points with no short-axis open on it
+        (e.g. just set / saved, Draw still on) — Deselect hides them (user
+        2026-11-26: turning Draw off was the only way out)."""
+        try:
+            m = self._measures[which][mi]
+        except (KeyError, IndexError, TypeError):
+            return False
+        if not isinstance(m, dict) or m.get("type") != "polyline":
+            return False
+        if self._cpr is not None and self._cpr_is_src(which, mi):
+            return False                     # the full (short-axis) Deselect
+        cpr_line = bool(m.get("_cpr_src")) or self._cpr_is_cpr_line(m)
+        return (cpr_line and bool(getattr(self, "_meas_on", False))
+                and not m.get("_cpr_desel"))
+
     def _cpr_edit_deselect_add(self, menu, which, mi):
         """Put 「選択を解除 (Deselect)」 at the TOP of the right-click menu of the
-        CPR line being edited (its short-axis is open). Returns the action or
+        CPR line being edited (its short-axis is open) — or of a CPR line that
+        shows all its edit points without a short-axis. Returns the action or
         None."""
-        if self._cpr is None or not self._cpr_is_src(which, mi):
+        if not ((self._cpr is not None and self._cpr_is_src(which, mi))
+                or self._cpr_desel_light_ok(which, mi)):
             return None
         from PyQt6.QtGui import QAction
         a = QAction(t("選択を解除 (Deselect)"), menu)
@@ -2042,14 +2060,22 @@ class CPRMixin:
             menu.addAction(a)
         return a
 
-    def _cpr_edit_deselect(self) -> bool:
+    def _cpr_edit_deselect(self, which=None, mi=None) -> bool:
         """Leave the edit of the CPR line now open in the short-axis. A Coronary
         Tree vessel goes straight back to its tree line (white before connect,
         its territory's branch colour after) — the editing copy is dropped and
         the tree overlay is pushed AT ONCE, so the line never vanishes. Unsaved
         changes are confirmed first. A line not in the tree yet stays as it is
         (kept for Save). Draw is armed again for the next line. False =
-        cancelled / nothing to leave."""
+        cancelled / nothing to leave. *which* / *mi*: the right-clicked line —
+        one with no short-axis open only drops its edit points (marked
+        _cpr_desel until it is edited again)."""
+        if which is not None and mi is not None \
+                and self._cpr_desel_light_ok(which, mi):
+            self._measures[which][mi]["_cpr_desel"] = True
+            self._cpr_sel = set()
+            self._redraw_meas(which)
+            return True
         c = self._cpr
         m = self._cpr_src_measure()
         if c is None or m is None:

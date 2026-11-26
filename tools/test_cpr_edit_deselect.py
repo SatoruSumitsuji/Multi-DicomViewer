@@ -152,7 +152,7 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           "or self._cpr_is_cpr_line(self._measures[which][hit[0]]))):" in src)
     check(f"{fn}: Deselect in both line menus",
           src.count("self._cpr_edit_deselect_add(menu, which, mi)") == 2
-          and src.count("self._cpr_edit_deselect()") == 2)
+          and src.count("self._cpr_edit_deselect(which, mi)") == 2)
     check(f"{fn}: 📁 Next-folder button removed",
           "self._cpr_next_dir_btn = None" in src
           and 'FitButton("📁 "' not in src)

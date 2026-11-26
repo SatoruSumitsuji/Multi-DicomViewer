@@ -2302,7 +2302,8 @@ class _Overlay(QWidget):
             idle_on, idle_off, hov_pts = [], [], []
             # The CPR source centreline shows its edit handles only while Measure is
             # ON; with Measure OFF it deselects to just the line (plain reference).
-            cpr_idle = bool(m.get("_cpr_src")) and not v._meas_on
+            cpr_idle = ((bool(m.get("_cpr_src")) and not v._meas_on)
+                        or bool(m.get("_cpr_desel")))   # right-click Deselect
             if not locked and not cpr_idle:         # valve ring = no handles
                 for vi, q in enumerate(v._handles(m)):
                     if mi == edit_mi and not edit_ca and vi == edit_vi:
@@ -10005,8 +10006,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
             if (m.get("hidden") or m.get("_bulk_hidden")
-                    or m.get("_lv_valve")):
-                continue          # invisible / LOCKED valve ring → not grabbable
+                    or m.get("_lv_valve") or m.get("_cpr_desel")):
+                continue          # invisible / LOCKED valve ring / Deselect
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_screen(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
@@ -10718,6 +10719,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         m = self._measures[which][mi]
         if m["type"] != "polyline" or len(m["pts"]) < 2:
             return
+        m.pop("_cpr_desel", None)                # edited again
         # Arm the Polyline tool so the next clicks EXTEND this trace. Sync the
         # toolbar buttons WITHOUT calling _set_measure_type, which would wipe
         # the draft we're about to install.
@@ -10914,7 +10916,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._make_circle(which, mi)         # records its own undo + redraw
             return
         if desel_act is not None and chosen is desel_act:
-            self._cpr_edit_deselect()            # leave the edit (line stays)
+            self._cpr_edit_deselect(which, mi)   # leave the edit (line stays)
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
@@ -11031,7 +11033,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._make_circle(which, mi)         # records its own undo + redraw
             return
         if desel_act is not None and chosen is desel_act:
-            self._cpr_edit_deselect()            # leave the edit (line stays)
+            self._cpr_edit_deselect(which, mi)   # leave the edit (line stays)
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
@@ -20345,6 +20347,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Hide All Result / Hide left on it must not hide the live line).
         self._measures[which][mi].pop("_bulk_hidden", None)
         self._measures[which][mi].pop("hidden", None)
+        self._measures[which][mi].pop("_cpr_desel", None)   # edited again
         u, v, nrm = self._axes_for(which)        # RMF seed = the drawn plane
         # Cross-section is ALWAYS pane A, MAP (route) is pane B. If drawn on A, move
         # the trace to B so the route stays visible after A becomes the cross-section.
