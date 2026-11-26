@@ -20277,8 +20277,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                          if not m.get("_cpr_src")]
                     if len(self._measures[k]) != before:
                         self._redraw_meas(k)
-            self._coro_edit_vid = ""
-            self._cpr_suggested_name = ""
+            self._coro_edit_end()
         except Exception:                            # noqa: BLE001
             pass
 
@@ -20300,6 +20299,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # re-sets these AFTER apply_cpr_data). A plain Draw leaves them cleared.
         self._coro_edit_vid = ""
         self._cpr_suggested_name = ""
+        # The line taken over is the one being edited: always visible (a
+        # Hide All Result / Hide left on it must not hide the live line).
+        self._measures[which][mi].pop("_bulk_hidden", None)
+        self._measures[which][mi].pop("hidden", None)
         u, v, nrm = self._axes_for(which)        # RMF seed = the drawn plane
         # Cross-section is ALWAYS pane A, MAP (route) is pane B. If drawn on A, move
         # the trace to B so the route stays visible after A becomes the cross-section.
@@ -20398,9 +20401,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         *keep_view* restores the MPR view that was showing when this short-axis
         was built (so re-Draw traces on the SAME image) instead of resetting."""
         # Leaving CPR ends any tree-vessel edit: stop suppressing its overlay line
-        # and forget its suggested Save name.
-        self._coro_edit_vid = ""
-        self._cpr_suggested_name = ""
+        # (pushed again — else it stayed missing) and forget its Save name.
+        self._coro_edit_end()
         if self._cpr is None:
             self._coronary_sync_ui()
             return

@@ -2068,6 +2068,33 @@ class CoronaryTreeWindow(SnapDock):
         tree = b.get("tree") if b else None
         return bool(tree is not None and getattr(tree, "vessels", None))
 
+    def stop_lines_for_series(self, series_uid: str,
+                              skip_vid: str = "") -> list:
+        """Every line of *series_uid*'s tree for Auto-Track to stop at — the
+        HIDDEN ones too (the tree data, not what is drawn) — as (points,
+        ignore_start, ignore_end): a line's PROXIMAL end (a branch origin
+        on the vessel being traced) is ignored; an unconnected 「枝」 has
+        no known proximal end → both. *skip_vid*: the line being edited."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        if not b or "tree" in self._unloaded(b):
+            return []
+        tr = b["tree"]
+        out = []
+        for vid, v in tr.vessels.items():
+            if vid == skip_vid:
+                continue
+            P = np.asarray(v.points, float)
+            if P.ndim != 2 or len(P) < 2:
+                continue
+            if not v.parent and tr.runs_reversed(vid):
+                out.append((P, True, True))      # unconnected branch
+            else:
+                pi = tr.proximal_idx(vid)
+                out.append((P, pi == 0, pi != 0))
+        return out
+
     def corotree_path_for_series(self, series_uid: str) -> str:
         """The .corotree.json path the dock loaded for *series_uid*'s CT (for the
         bottom-bar filename readout), or ""."""
@@ -3607,6 +3634,7 @@ class CoronaryTreeWindow(SnapDock):
         "bifurcation": "分岐で太さ・向きが同程度（幹を決めない）",
         "edge": "画像の端", "length": "長さの上限", "contrast": "造影が弱い",
         "cancel": "停止（ここまでを残しました）", "short": "線が短い",
+        "existing": "既存の CPR 線に到達（終点をその線上に置きました）",
         "fork": "分岐（進む内腔を選んでください）",
         "timeout": "時間切れ（この線の追跡が終わらなかった）",
         "error": "エラー"}

@@ -123,8 +123,7 @@ class CPRMixin:
             headless = getattr(self, "_cpr_headless", None) is not None
             self._cpr_headless = None
             if headless and self._cpr is None:   # no short-axis holds them
-                self._coro_edit_vid = ""
-                self._cpr_suggested_name = ""
+                self._coro_edit_end()
         if ok:
             if rearm:                            # SaveNext: Auto back on
                 self._cpr_resume_auto_restore()
@@ -143,8 +142,7 @@ class CPRMixin:
                 # short-axis (view kept) and arm Draw for the next vessel.
                 self._coronary_draw()
                 self._cpr_parked = None          # saved: nothing pending now
-                self._coro_edit_vid = ""
-                self._cpr_suggested_name = ""
+                self._coro_edit_end()
             self._cpr_hide_all_results()
             self._coronary_sync_ui()
             if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
@@ -417,10 +415,32 @@ class CPRMixin:
             pass
         return self._cpr_last_path
 
+    def _coro_edit_end(self) -> None:
+        """The tree-vessel edit is over: forget it, and when one WAS being
+        edited push the tree overlay again so its line (dropped from this
+        viewer's overlay while edited) is drawn at once."""
+        had = bool(getattr(self, "_coro_edit_vid", ""))
+        self._coro_edit_vid = ""
+        self._cpr_suggested_name = ""
+        if not had:
+            return
+        shell = self.window() if hasattr(self, "window") else None
+        if shell is not None and hasattr(shell, "coronary_overlay_refresh"):
+            try:
+                shell.coronary_overlay_refresh()
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _cpr_hide_all_results(self) -> None:
         """Hide every result shown now (= Hide All Result until nothing shows);
         lines drawn later stay visible, Show All Result brings them back."""
         items = self._hideall_items() if hasattr(self, "_hideall_items") else []
+        # The line still open in the short-axis (上書き保存 / Auto-Track keep
+        # editing it) stays visible — hiding it left nothing drawn (user
+        # 2026-11-26: a confirmed CPR line missing from the image).
+        live = (self._cpr_source_measure()
+                if getattr(self, "_cpr", None) is not None else None)
+        items = [x for x in items if x is not live]
         if not items:
             return
         for x in items:
@@ -2498,7 +2518,9 @@ class CPRMixin:
         import time
         import traceback
         from PyQt6.QtWidgets import QApplication
-        from multi_dicomviewer.core.cpr_autoextend import (extend_vessel,
+        from multi_dicomviewer.core.cpr_autoextend import (LineStops,
+                                                           end_on_line,
+                                                           extend_vessel,
                                                            save_log,
                                                            stop_detail)
         from multi_dicomviewer.ui.autotrack_progress import (
@@ -2527,6 +2549,17 @@ class CPRMixin:
             live = False
         before = self._meas_pane_snap(which)
         base = [list(map(float, q)) for q in p3]
+        # existing CPR lines of this CT's tree (hidden ones too): the trace
+        # stops when the lumen centre 3 mm ahead comes within 3 mm of one
+        # and ends ON it (user 2026-11-26 — it ran past a parent line)
+        stops = None
+        try:
+            if shell is not None and hasattr(shell, "coronary_stop_lines"):
+                stops = LineStops(shell.coronary_stop_lines(self), base=p3)
+        except Exception:                                # noqa: BLE001
+            traceback.print_exc()
+            stops = None
+        met = {}
 
         def _apply(extra):
             pts = base + [list(map(float, q)) for q in extra]
@@ -2538,6 +2571,11 @@ class CPRMixin:
             pg = pg_ref.get("pg")
             if line_id != 0:                   # branches: progress only
                 return not (pg is not None and pg.cancelled())
+            if stops and not met:
+                h = stops.hit(np.asarray(path, float)[-1])
+                if h is not None:
+                    met["Q"] = h[1]            # stop: end on that line
+                    return False
             try:
                 _apply(np.asarray(path, float)[1:])
                 if live and self._cpr is not None:
@@ -2574,10 +2612,16 @@ class CPRMixin:
                 add = np.asarray(res.trunk.ctrl, float)[1:]
                 trunk_mm = float(np.linalg.norm(
                     np.diff(res.trunk.path, axis=0), axis=1).sum())
+                if met.get("Q") is not None:
+                    add = end_on_line(add, met["Q"])
                 _apply(add)
                 m["_auto_traced"] = True
+            elif met.get("Q") is not None:
+                _apply(end_on_line([], met["Q"]))
             else:
                 _apply([])
+            if met.get("Q") is not None:
+                res.stop = "existing"          # reached an existing line
             self._meas_record(which, before)
             if self._cpr_is_src(which, mi):
                 self._cpr_rebuild()
@@ -2760,7 +2804,7 @@ class CPRMixin:
     def _cpr_probe_ok(self, which, mi, m, out, stop) -> bool:
         """The stop section can be shown (see _cpr_autotrack_probe)."""
         q = (out.get("detail") or {}).get("q")
-        return bool(q is not None and stop != "cancel"
+        return bool(q is not None and stop not in ("cancel", "existing")
                     and self._cpr is not None
                     and self._cpr_is_src(which, mi)
                     and len(m.get("pts3d") or []) >= 2)

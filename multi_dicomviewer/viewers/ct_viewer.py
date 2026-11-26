@@ -3606,8 +3606,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                          if not m.get("_cpr_src")]
                     if len(self._measures[k]) != before:
                         self._redraw_meas(k)
-            self._coro_edit_vid = ""
-            self._cpr_suggested_name = ""
+            self._coro_edit_end()
         except Exception:                            # noqa: BLE001
             pass
 
@@ -20951,6 +20950,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # its overlay isn't suppressed and Save offers the generic name.
         self._coro_edit_vid = ""
         self._cpr_suggested_name = ""
+        # The line taken over is the one being edited: always visible (a
+        # Hide All Result / Hide left on it must not hide the live line).
+        self._measures[which][mi].pop("_bulk_hidden", None)
+        self._measures[which][mi].pop("hidden", None)
         # Capture the frame of the pane the route was drawn on (the RMF seed).
         u, v, nrm = self._axes_for(which)
         # The cross-section is ALWAYS pane A, the MAP (with the drawn route) is pane
@@ -21081,9 +21084,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         was built (so re-Draw traces on the SAME image), instead of resetting to
         a default MPR."""
         # Leaving CPR ends any tree-vessel edit: stop suppressing its overlay line
-        # and forget its suggested Save name.
-        self._coro_edit_vid = ""
-        self._cpr_suggested_name = ""
+        # (pushed again — else it stayed missing) and forget its Save name.
+        self._coro_edit_end()
         if self._cpr is None:
             self._coronary_sync_ui()
             return

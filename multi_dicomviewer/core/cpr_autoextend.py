@@ -996,6 +996,64 @@ def extend_vessel(vol, dims, ctrl, prm: ExtendParams | None = None,
     return ExtendResult(trunk, branches, stop, log, list(T.fork))
 
 
+class LineStops:
+    """Existing CPR lines a single-line Auto-Track stops at (user
+    2026-11-26): when the lumen centre found 3 mm ahead comes within
+    *reach_mm* of one, the trace ends there and its end point is put ON
+    that line (so the tree connects it, ≤ 5 mm). *lines*: (points (N,3),
+    ignore_start, ignore_end) — the zone within *end_mm* of an ignored end
+    (a branch's origin sitting on the vessel being traced) does not stop
+    it. A line *base* itself lies on (its own saved copy) is left out."""
+
+    def __init__(self, lines, base=None, reach_mm: float = 3.0,
+                 end_mm: float = 5.0, own_tol: float = 1.0):
+        self.reach = float(reach_mm)
+        B = (np.asarray(base, float).reshape(-1, 3)
+             if base is not None and len(base) else np.zeros((0, 3)))
+        keep = []
+        for P, ign0, ign1 in lines or []:
+            P = np.asarray(P, float).reshape(-1, 3)
+            if len(P) < 2:
+                continue
+            if len(B):
+                dB = np.array([float(np.linalg.norm(P - q, axis=1).min())
+                               for q in B])
+                if dB[-1] <= own_tol and (dB <= own_tol).mean() >= 0.5:
+                    continue                     # the traced line's own copy
+            s = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(P, axis=0),
+                                                    axis=1))]
+            k = np.ones(len(P), bool)
+            if ign0:
+                k &= s >= end_mm
+            if ign1:
+                k &= s <= s[-1] - end_mm
+            if k.any():
+                keep.append(P[k])
+        self.P = np.vstack(keep) if keep else np.zeros((0, 3))
+
+    def __bool__(self) -> bool:
+        return len(self.P) > 0
+
+    def hit(self, p):
+        """(distance, nearest point) when *p* is within reach, else None."""
+        if not len(self.P):
+            return None
+        d = np.linalg.norm(self.P - np.asarray(p, float), axis=1)
+        k = int(np.argmin(d))
+        return (float(d[k]), self.P[k].copy()) if d[k] <= self.reach else None
+
+
+def end_on_line(ctrl, Q, near_mm: float = 1.0):
+    """*ctrl* (the added edit points) ending ON the existing line at *Q*:
+    trailing points within *near_mm* of it are dropped, then *Q* is the
+    last point."""
+    C = [np.asarray(c, float) for c in (ctrl if ctrl is not None else [])]
+    Q = np.asarray(Q, float)
+    while C and float(np.linalg.norm(C[-1] - Q)) < near_mm:
+        C.pop()
+    return np.asarray(C + [Q], float)
+
+
 @dataclass
 class ToTreeResult:
     ctrl: np.ndarray                 # the whole line, proximal → distal

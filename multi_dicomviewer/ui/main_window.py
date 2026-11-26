@@ -4069,6 +4069,19 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
 
     # ---- CPR line separate / connect (user 2026-11-18) -----------------------
+    def coronary_stop_lines(self, viewer) -> list:
+        """The tree lines of *viewer*'s CT for its Auto-Track to stop at
+        (hidden ones included; the line being edited left out)."""
+        w = getattr(self, "_corotree_win", None)
+        pane = self._pane_of_viewer(viewer)
+        if w is None or pane is None or self._corotree_dock_hidden():
+            return []
+        uid = pane.shown_series_uid() or ""
+        if not uid or not hasattr(w, "stop_lines_for_series"):
+            return []
+        return w.stop_lines_for_series(
+            uid, getattr(viewer, "_coro_edit_vid", "") or "")
+
     def coronary_split_vessel(self, viewer, vid: str, idx: int) -> bool:
         """A tree line's 「ここで separate」 on *viewer*: cut it at sample *idx*
         (the distal part gets the next serial name, next to the original)."""
