@@ -10873,6 +10873,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             del_pt = menu.addAction(t("Delete point"))
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        multi_del = self._cpr_multi_del_add(menu, which, mi)
         # A CONFIRMED CPR centreline (tagged _cpr_src) → re-enter its short-axis
         # so the control points can be edited (Add / Delete / move). This is the
         # "編集 (Resume)" an unsaved CPR needs: it is not yet a tree vessel, so the
@@ -10917,6 +10918,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         if desel_act is not None and chosen is desel_act:
             self._cpr_edit_deselect(which, mi)   # leave the edit (line stays)
+            return
+        if multi_del is not None and chosen is multi_del:
+            self._cpr_multi_del_start()          # Polygon → delete those points
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
@@ -10983,6 +10987,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if m["type"] in ("polyline", "polygon") and near_vi is not None:
             del_near = menu.addAction(t("Delete point"))
             del_near.setEnabled(len(m["pts"]) > 2)
+        multi_del = self._cpr_multi_del_add(menu, which, mi)
         _tag = m.get("_lv")
         if (_tag is not None and _tag[1] == "epi" and self._lv is not None
                 and self._lv["model"].epi_sax_levels is not None):
@@ -11034,6 +11039,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         if desel_act is not None and chosen is desel_act:
             self._cpr_edit_deselect(which, mi)   # leave the edit (line stays)
+            return
+        if multi_del is not None and chosen is multi_del:
+            self._cpr_multi_del_start()          # Polygon → delete those points
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste

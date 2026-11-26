@@ -3211,6 +3211,7 @@ class CPRMixin:
         if st is None:
             return False
         self._cpr_lasso_stash = None
+        self._cpr_multi_del = False
         self._cpr_lasso_restoring = True
         try:
             if getattr(self, "_meas_on", False):
@@ -3228,6 +3229,50 @@ class CPRMixin:
         for k in ("A", "B"):
             self._redraw_meas(k)
         return True
+
+    # ---- 「複数点の削除」 (user 2026-11-26): right-click ▸ below 「点の削除」 →
+    # draw a Polygon round the edit points → they are deleted (one Ctrl+Z).
+    def _cpr_multi_del_ok(self, which, mi) -> bool:
+        """Offered on the CPR line open in the short-axis (its map pane)."""
+        c = self._cpr
+        return (c is not None and which == c.get("src")
+                and self._cpr_is_src(which, mi)
+                and getattr(self, "_mode", "3D") == "3D")
+
+    def _cpr_multi_del_add(self, menu, which, mi, after=None):
+        """Put 「複数点の削除」 right below *after* (「点の削除」) — or at the
+        end. Returns the action or None."""
+        if not self._cpr_multi_del_ok(which, mi):
+            return None
+        from PyQt6.QtGui import QAction
+        a = QAction(t("Delete multiple points"), menu)
+        a.setToolTip(t("Polygon で囲んだ編集点をまとめて削除します"))
+        acts = menu.actions()
+        if after is not None and after in acts:
+            i = acts.index(after)
+            if i + 1 < len(acts):
+                menu.insertAction(acts[i + 1], a)
+            else:
+                menu.addAction(a)
+        else:
+            menu.addAction(a)
+        return a
+
+    def _cpr_multi_del_start(self) -> None:
+        """Arm the Polygon (lasso) for 「複数点の削除」: the points inside the
+        polygon the user now draws on the map pane are deleted."""
+        if self._cpr is None:
+            return
+        if not getattr(self, "_meas_on", False) \
+                and getattr(self, "_meas_btn", None) is not None:
+            self._meas_btn.setChecked(True)          # Measure on for the lasso
+            self._toggle_measure()
+        self._cpr_sel = set()
+        self._set_measure_type("polygon")            # → _cpr_lasso_begin
+        self._cpr_multi_del = getattr(self, "_cpr_lasso_stash", None) is not None
+        if self._cpr_multi_del:
+            self._cpr_autotrack_hint(t(
+                "削除する編集点を Polygon で囲んでください（閉じると削除）"))
 
     def _cpr_lasso_commit(self, which, pts_out) -> bool:
         """A finished Polygon while working on CPR lines: select what lies
@@ -3253,10 +3298,19 @@ class CPRMixin:
         n_end = len(self._coro_end_sel_get())
         sx, sy = poly[-1]
         from PyQt6.QtCore import QTimer
+        multi = bool(getattr(self, "_cpr_multi_del", False))
+        self._cpr_multi_del = False
 
         def menu():
             try:
-                if n_edit:
+                if multi:                            # 「複数点の削除」
+                    self._coro_end_sel_clear() \
+                        if hasattr(self, "_coro_end_sel_clear") else None
+                    if n_edit:
+                        self._cpr_lasso_restore()
+                        self._cpr_sel_apply("delete")
+                    self._cpr_sel = set()
+                elif n_edit:
                     self._cpr_lasso_restore()        # map edit state for it
                     self._cpr_sel_menu(which, sx, sy)
                 elif n_end:
