@@ -884,6 +884,7 @@ class CoronaryTreeWindow(SnapDock):
             self._bundle()["paths"][new_vid] = path   # enable in-place overwrite
         self._populate()
         self.treeChanged.emit()
+        self._show_confirmed([new_vid])
         # Always push: even with the 2-D ツリー表示 toggle OFF, the VR coronary tubes
         # are drawn (force=True), so a just-Saved CPR shows on the VR immediately.
         self._push_overlay()
@@ -935,6 +936,26 @@ class CoronaryTreeWindow(SnapDock):
             out["fix_name"] = v.fix_name
         return out
 
+    def _show_confirmed(self, vids) -> None:
+        """A CPR line just confirmed (registered / overwritten / Auto-Track
+        and its branches) is DRAWN on the image (user 2026-11-26: 「08」 was
+        in the tree but nothing showed until ツリー + 表示): the tree overlay
+        goes on (button label too — the CT is shown already, no re-show) and
+        those vessels are un-hidden. Push the overlay after this."""
+        unhid = False
+        for vid in vids or []:
+            uid = self._ct_of_vessel(vid) if vid else ""
+            hid = self._by_uid[uid]["hidden"] if uid in self._by_uid else ()
+            if vid in hid:
+                hid.discard(vid)
+                unhid = True
+        if not self._overlay_on:
+            self._overlay_on = True
+            if self._overlay_btn is not None:
+                self._overlay_btn.setText(t("非表示"))
+        if unhid:
+            self._populate()                     # its 表示 check back on
+
     def update_vessel_cpr(self, vid: str, ctrl, path: str = "") -> bool:
         """Overwrite vessel *vid*'s centreline IN PLACE from edited control points
         (keeps its name / role / parent), refresh the overlay, and remember the
@@ -958,6 +979,7 @@ class CoronaryTreeWindow(SnapDock):
             b["paths"][vid] = path
         self._populate()
         self.treeChanged.emit()
+        self._show_confirmed([vid])
         self._push_overlay()
         self._hint.setText(t("「{n}」を上書き保存しました。", n=v.name))
         return True
@@ -3768,6 +3790,7 @@ class CoronaryTreeWindow(SnapDock):
         made = [m for m in made if m]
         self._populate()
         self.treeChanged.emit()
+        self._show_confirmed([vid] + made)
         self._push_overlay()
         return made
 
@@ -3811,6 +3834,7 @@ class CoronaryTreeWindow(SnapDock):
         if not made:
             self._populate()
             self.treeChanged.emit()
+            self._show_confirmed([vid])
             self._push_overlay()
         out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
                "found": len(res.branches),
