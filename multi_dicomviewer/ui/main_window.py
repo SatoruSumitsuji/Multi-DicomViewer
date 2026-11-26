@@ -5312,6 +5312,8 @@ class MainWindow(QMainWindow):
         out = []
         try:
             for root, _dirs, names in os.walk(folder):
+                # 「元ファイルごと削除」 moved those there — not loaded again
+                _dirs[:] = [d_ for d_ in _dirs if d_ != "_deleted"]
                 for nm in names:
                     if nm.lower().endswith(".cpr.json"):
                         out.append(os.path.join(root, nm))

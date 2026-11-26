@@ -1016,6 +1016,7 @@ class CoronaryTreeWindow(SnapDock):
         other_names: set = set()     # safe-names found but for a DIFFERENT case
         dup = 0
         for root, _dirs, fnames in os.walk(folder):
+            _dirs[:] = [d_ for d_ in _dirs if d_ != self.DELETED_DIR]
             for fn in fnames:
                 if not fn.lower().endswith(".cpr.json"):
                     continue
@@ -1342,6 +1343,7 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             if os.path.isdir(f):
                 for root, _dirs, names in os.walk(f):
+                    _dirs[:] = [d_ for d_ in _dirs if d_ != "_deleted"]
                     for nm in names:
                         if nm.lower().endswith(".cpr.json"):
                             out.append(os.path.join(root, nm))
@@ -3253,16 +3255,81 @@ class CoronaryTreeWindow(SnapDock):
             return
         victims = [vid, *self._tree.descendants(vid)]
         name = self._tree.vessels[vid].name
-        if QMessageBox.question(
-                self, t("削除"),
-                t("{name} とその下流の枝 {k} 本を削除しますか? "
-                  "(元のCPRファイルは残ります)", name=name,
-                  k=len(victims) - 1)) != QMessageBox.StandardButton.Yes:
+        mode = self._ask_delete_mode(
+            t("{name} とその下流の枝 {k} 本を削除しますか?", name=name,
+              k=len(victims) - 1))
+        if mode is None:
             return
+        b = self._bundle()
+        if mode == "file":
+            self._retire_cpr_files(b, victims)
         for k in victims:
             self._tree.vessels.pop(k, None)
+            b["paths"].pop(k, None)
         self._populate()
         self.treeChanged.emit()
+
+    #: sub-folder (next to the CPR files) that 「元ファイルごと削除」 moves
+    #: them to — kept, so a mistake can be undone by hand; folder scans
+    #: (フォルダ更新 / 読込 / a dropped folder) skip it
+    DELETED_DIR = "_deleted"
+
+    def _ask_delete_mode(self, text: str):
+        """Delete prompt (user 2026-11-26): 「元ファイルごと削除」 → "file",
+        「リストから消去」 → "list", 「キャンセル」 → None."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(t("削除"))
+        box.setText(text)
+        box.setInformativeText(t(
+            "「元ファイルごと削除」は CPR ファイルを同じフォルダの "
+            "_deleted フォルダへ移します（手で戻せます）。"))
+        b_file = box.addButton(t("元ファイルごと削除"),
+                               QMessageBox.ButtonRole.DestructiveRole)
+        b_list = box.addButton(t("リストから消去"),
+                               QMessageBox.ButtonRole.AcceptRole)
+        b_cancel = box.addButton(t("キャンセル"),
+                                 QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_cancel)
+        box.setEscapeButton(b_cancel)
+        box.exec()
+        ch = box.clickedButton()
+        return ("file" if ch is b_file else "list" if ch is b_list
+                else None)
+
+    def _retire_cpr_files(self, b, vids) -> int:
+        """Move the CPR files of *vids* (bundle *b*) into the DELETED_DIR
+        beside each (a name already there gets a time stamp). Returns how
+        many were moved; a failure is reported, the rest goes on."""
+        import datetime
+        import shutil
+        moved, failed = 0, []
+        for vid in vids:
+            p = (b.get("paths") or {}).get(vid)
+            if not p or not os.path.isfile(p):
+                continue
+            dd = os.path.join(os.path.dirname(p), self.DELETED_DIR)
+            dst = os.path.join(dd, os.path.basename(p))
+            try:
+                os.makedirs(dd, exist_ok=True)
+                if os.path.exists(dst):
+                    stem = os.path.basename(p)[:-len(".cpr.json")] \
+                        if p.lower().endswith(".cpr.json") \
+                        else os.path.splitext(os.path.basename(p))[0]
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    dst = os.path.join(dd, f"{stem}_{ts}.cpr.json")
+                    k = 2
+                    while os.path.exists(dst):
+                        dst = os.path.join(dd, f"{stem}_{ts}_{k}.cpr.json")
+                        k += 1
+                shutil.move(p, dst)
+                moved += 1
+            except OSError:
+                failed.append(os.path.basename(p))
+        if failed:
+            self._warn(t("次のファイルを _deleted へ移せませんでした:\n{f}",
+                         f="\n".join(failed)))
+        return moved
 
     def _delete_selected(self):
         """消去 button — remove the vessels SELECTED in the list (each + its
@@ -3292,17 +3359,19 @@ class CoronaryTreeWindow(SnapDock):
             victims[uid] = vic
             total_sel += len(vids)
             total_vic += len(vic)
-        if QMessageBox.question(
-                self, t("消去"),
-                t("選択した {n} 本（下流の枝を含め計 {k} 本）を消去しますか? "
-                  "(元のCPRファイルは残ります)", n=total_sel, k=total_vic)) \
-                != QMessageBox.StandardButton.Yes:
+        mode = self._ask_delete_mode(
+            t("選択した {n} 本（下流の枝を含め計 {k} 本）を削除しますか?",
+              n=total_sel, k=total_vic))
+        if mode is None:
             return
         for uid, vic in victims.items():
             b = self._by_uid[uid]
+            if mode == "file":
+                self._retire_cpr_files(b, vic)
             for v in vic:
                 b["tree"].vessels.pop(v, None)
                 b["hidden"].discard(v)
+                b["paths"].pop(v, None)
         self._populate()
         self.treeChanged.emit()
 

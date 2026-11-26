@@ -711,6 +711,7 @@ dk._item_for_vid("z").setSelected(True)
 _real_q = QMessageBox.question
 QMessageBox.question = staticmethod(
     lambda *a, **k: QMessageBox.StandardButton.Yes)
+dk._ask_delete_mode = lambda *a, **k: "list"     # 「リストから消去」
 _mtext = (Path(ctw.__file__).read_text(encoding="utf-8"))
 check("right-click 削除 → every selected line (the old 消去 job)",
       "elif chosen is a_del:" in _mtext

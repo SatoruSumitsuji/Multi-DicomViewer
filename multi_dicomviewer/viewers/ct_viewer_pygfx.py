@@ -9447,9 +9447,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         by the overlay). Repaints only the hovered pane."""
         if self._vol is None:
             return
-        w = self._disp_to_world(which, sx, sy)
         try:
-            hu = self._hu_at(self._out_to_world3d(which, *w))
+            if self._cpr is not None and which == "A":
+                # the short axis: the section's own plane / camera, not the
+                # MPR's (user 2026-11-26)
+                P = self._cpr_offset_to_world3d(
+                    *self._cpr_screen_to_offset(sx, sy))
+            else:
+                w = self._disp_to_world(which, sx, sy)
+                P = self._out_to_world3d(which, *w)
+            hu = self._hu_at(P)
         except Exception:
             hu = None
         self._probe_hover = (which, sx, sy, "—" if hu is None else f"HU {hu:.0f}")

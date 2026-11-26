@@ -15047,7 +15047,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         w = self._disp_to_world(which, sx, sy)
         try:
-            hu = self._hu_at(self._out_to_world3d(which, *w))
+            if self._cpr is not None and which == "A":
+                # the short axis: the section's own plane, not the MPR's
+                P = self._cpr_offset_to_world3d(*w)
+            else:
+                P = self._out_to_world3d(which, *w)
+            hu = self._hu_at(P)
         except Exception:
             hu = None
         p.hover_hu.SetInput("—" if hu is None else f"HU {hu:.0f}")

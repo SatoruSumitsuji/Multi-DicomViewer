@@ -1512,6 +1512,14 @@ class CPRMixin:
         except Exception:                                # noqa: BLE001
             pass
 
+    def _cpr_offset_to_world3d(self, du, dv):
+        """A short-axis in-plane offset (du, dv mm along the section's u, v)
+        → the 3-D volume point ON that section (user 2026-11-26: the point
+        probe's HU on the short axis was read from the MPR plane instead)."""
+        o, u, vv, _n = self._cpr_frame()
+        return (np.asarray(o, float) + float(du) * np.asarray(u, float)
+                + float(dv) * np.asarray(vv, float))
+
     #: colour of the right-pane (long-axis) plane line on the short axis
     _CPR_MAP_LINE_RGB = (0, 200, 255)
     #: alpha of its slab-face 点線 (25 % — 50 % stood out too much, user
