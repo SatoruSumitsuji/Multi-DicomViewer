@@ -4547,9 +4547,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             lambda: self._lvv_set_thick_mode("sax"))
         gb.addWidget(self._lvv_thicksax_btn)
         row1.addWidget(self._lv_grp_blood)
-        # 「Territory計算」 (Calc Territory, CoronaryTreeモード only) at the row end.
-        row1.addSpacing(12)
-        row1.addWidget(self._ct_terr_button())
+        # Territory Calc / Load / Save: row 3 (読込ファイル), not here.
         row1.addStretch(1)
         # Row order = the row-1 mode order: LV → CoronaryTree → Territory.
         self._ct_bar_reorder(row1)
@@ -10548,6 +10546,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._territory_display = True
         self._cpr_mark_full_lv()             # FullLv Epi → CPR VR; no EpiLv pick
         self._refresh_tool_availability()
+        self._update_active_frames()         # right pane: always red frame
         self._terr_bar_sync()                # swap LV/Coronary bars → Territory bar
         QTimer.singleShot(0, self._terr_vr_rotate)   # VR on + Rotate
         return True
@@ -11025,6 +11024,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "(45° snaps clockwise). Shift+click snaps BOTH panes"))
         self._spin_snap_btn.clicked.connect(self._spin_snap)
         row2.addWidget(self._spin_snap_btn)
+        # Spine= (user 2026-11-27): head up / feet down on the section
+        self._spine_btn = FitButton(t("Spine="))
+        self._spine_btn.setStyleSheet(self._BTN_DIS)
+        self._spine_btn.setHelpToolTip(t("Spine=：断面の中で画像を回し、体の頭側を上・尾側を下にそろえます（左室短軸なら肝臓側の下縁が水平に）。Shift+クリックで両ペイン"))
+        self._spine_btn.clicked.connect(self._spine_snap)
+        row2.addWidget(self._spine_btn)
         # Grayscale invert (black↔white negative) — right of Flip-V.
         self._invert_btn = FitButton(t("WB reverse"))
         self._invert_btn.setCheckable(True)
@@ -22334,9 +22339,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # 橙なら Alt+ (user 2026-11-26): with Measure on the view tools ALWAYS
         # need Alt — a type chosen or not — so the frame is orange whenever
         # Measure is on.
-        alt = bool(getattr(self, "_meas_on", False))
+        # Territory review (user 2026-11-27): the RIGHT pane only observes /
+        # sets the Territory range (a left-drag always turns the VR) → always
+        # red; the left pane follows Measure (橙 on, 赤 off).
+        meas = bool(getattr(self, "_meas_on", False))
+        terr = bool(getattr(self, "_territory_display", False))
         for key, f in self._frames.items():
             act = key == self._active_pane
+            alt = meas and not (terr and key == "B")
             colr = ("#ff8c00" if alt else "#ff2020") if act else "transparent"
             if flash and act:
                 colr = "#ffe000"
@@ -22903,6 +22913,94 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if abs(delta) < 1e-4:
             return False
         cam.Roll(delta / per)                       # snaps the crossline to target
+        return True
+
+
+    def _spine_foot_dir(self, key):
+        """Spine= : the patient's FOOT (caudal) direction projected on pane
+        *key*'s section, as an output-plane (x, y) unit vector — or None when
+        the section is (nearly) across the body axis, a VR pane, or 2-D.
+        Computed in patient space (pbasis @ u / v), so a left-handed basis
+        cannot flip it."""
+        if getattr(self, "_mode", "3D") != "3D" \
+                or (getattr(self, "_vr_on", {}) or {}).get(key):
+            return None
+        try:
+            u = np.asarray(self._frame[key][0], float)
+            v = np.asarray(self._frame[key][1], float)
+            pb = np.asarray(getattr(self, "_pbasis", np.eye(3)), float)
+            fu = -float((pb @ u)[2])             # patient S = +Z (LPS)
+            fv = -float((pb @ v)[2])
+        except Exception:                        # noqa: BLE001
+            return None
+        nrm = math.hypot(fu, fv)
+        if nrm < 0.17:                           # within ~10° of axial
+            return None
+        return fu / nrm, fv / nrm
+
+    def _spine_snap(self) -> None:
+        """Spine= : roll the ACTIVE pane so the body's head is up and its feet
+        down (the head-foot axis vertical on screen). Shift+click: both
+        panes. The frame / measurements are unchanged (a camera roll)."""
+        from PyQt6.QtWidgets import QApplication
+        if getattr(self, "_image", None) is None \
+                and getattr(self, "_vol", None) is None:
+            return
+        shift = bool(QApplication.keyboardModifiers()
+                     & Qt.KeyboardModifier.ShiftModifier)
+        keys = ("A", "B") if shift else (self._active_pane,)
+        before = self._view_snapshot()
+        changed = False
+        none = 0
+        for key in keys:
+            if self._spine_foot_dir(key) is None:
+                none += 1
+                continue
+            if self._spine_snap_pane(key):
+                changed = True
+        if changed:
+            self._view_initial = False
+            self._spine_refresh(keys)
+            self._undo_view(before, self._view_snapshot())
+        elif none == len(keys):
+            try:
+                self.window().statusBar().showMessage(t(
+                    "Spine=：この断面は体軸にほぼ垂直なので、頭尾の向きが"
+                    "決まりません"), 6000)
+            except Exception:                    # noqa: BLE001
+                pass
+
+    def _spine_refresh(self, keys) -> None:
+        self._refresh()
+
+    def _spine_snap_pane(self, key) -> bool:
+        """Roll pane *key*'s camera so the patient's feet point straight down
+        on screen (display y is up in VTK → −90°). True if it rolled."""
+        d = self._spine_foot_dir(key)
+        if d is None:
+            return False
+        ren = self.pane[key].ren
+        cam = ren.GetActiveCamera()
+        ccx, ccy = self._cc(key)
+
+        def ang():
+            ren.SetWorldPoint(ccx, ccy, 0.5, 1.0)
+            ren.WorldToDisplay()
+            a0 = ren.GetDisplayPoint()
+            ren.SetWorldPoint(ccx + d[0], ccy + d[1], 0.5, 1.0)
+            ren.WorldToDisplay()
+            a1 = ren.GetDisplayPoint()
+            return math.degrees(math.atan2(a1[1] - a0[1], a1[0] - a0[0]))
+        sa = ang()
+        cam.Roll(1.0)
+        per = ((ang() - sa + 180.0) % 360.0) - 180.0
+        cam.Roll(-1.0)
+        if abs(per) < 1e-6:
+            return False
+        delta = ((-90.0 - sa + 180.0) % 360.0) - 180.0
+        if abs(delta) < 1e-4:
+            return False
+        cam.Roll(delta / per)
         return True
 
     def _page_step(self, step):

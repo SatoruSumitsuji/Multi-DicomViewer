@@ -321,11 +321,11 @@ check("Territory計算 visible in CoronaryTreeモード, enabled (tree + LV read
 check("Territoryモード not selectable before a result",
       not b["territory"].isEnabled())
 v._ct_mode_clicked("lv")
-check("Territory: Calc disabled in LVモード (group hidden there)",
-      not tb.isEnabled() and v._ct_terr_wrap.isHidden())
+check("Territory Calc enabled in LVモード too (row 3, 2026-11-27)",
+      tb.isEnabled() and not tb.isHidden())
 v._ct_mode_clicked("standard")
 check("Territory: Calc enabled in Simple View (2026-11-17, tree + LV ready)",
-      tb.isEnabled() and not v._ct_terr_wrap.isHidden())
+      tb.isEnabled() and not tb.isHidden())
 check("Territory Load always enabled; Save disabled without a result",
       v._ct_terr_load_btn.isEnabled() and not v._ct_terr_save_btn.isEnabled())
 v._ct_terr_load_btn.click()
@@ -339,6 +339,9 @@ v._lv_missing = ["Epi(region)"]
 v.refresh_ct_mode_bar()
 check("Territory計算 disabled while the LV is incomplete and no FullLv",
       not tb.isEnabled())
+check("… its tooltip names what is missing (FullLv / LV)",
+      t("足りないもの: {m}", m=t("FullLv（または LV 計測）"))
+      in (tb.property("ct_tip") or ""), tb.property("ct_tip"))
 v._lv_missing = []
 v.refresh_ct_mode_bar()
 
@@ -356,9 +359,16 @@ check("in place: Territory review on (light path: LV kept, no apply_full_lv)",
       and ("axis",) in v.calls and v._vr_on["B"] and not sh.set_modes)
 check("review shows the LV (+ tree) again", not v._ct_lv_hidden
       and v._coro_overlay is not None)
-check("Territoryモード checked + Calc disabled in the review, Save enabled",
-      b["territory"].isChecked() and not tb.isEnabled()
+check("Territoryモード checked + Calc (recompute) and Save enabled",
+      b["territory"].isChecked() and tb.isEnabled()
       and v._ct_terr_save_btn.isEnabled())
+n_c = len(sh.computed)
+run_deferred(tb.click)
+check("in the review: Calc = recompute (left, computed again, back in it)",
+      len(sh.computed) == n_c + 1 and v._ct_current_mode() == "territory"
+      and sh.left, (len(sh.computed), v._ct_current_mode()))
+sh.left.clear()                     # the logs as before the recompute
+del sh.computed[n_c:]
 v.calls.clear()
 v._ct_mode_clicked("coronary")
 check("leave → VR off, previous view restored (frames / centre), refit",
@@ -458,16 +468,16 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           "on_full_lv_created" not in src
           and "_full_lv_saved_path = path" in src)
 
-# 「Territory計算」 (Calc Territory) is not in the mode row: the viewers put it
-# at the right end of the Coronary / VR / LV row.
+# 「Territory Calc」 is not in the mode row nor the Coronary / LV row: it is
+# in row 3 (読込ファイル), between the inputs and the territory (2026-11-27).
 check("Territory group not added to the mode row",
       "addWidget(self._ct_terr_button())"
       not in (root / "ct_mode_bar.py").read_text(encoding="utf-8"))
 for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (root / fn).read_text(encoding="utf-8")
-    check(f"{fn}: Territory計算 at the end of the Coronary row",
-          "row1.addWidget(self._ct_terr_button())\n"
-          "        row1.addStretch(1)" in src)
+    check(f"{fn}: Territory Calc not in the Coronary / LV row any more",
+          "self._ct_terr_button()" not in src
+          and "self._build_ct_files_line()" in src)
 
 for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (root / fn).read_text(encoding="utf-8")
@@ -478,6 +488,15 @@ src = (root / "ct_viewer_pygfx.py").read_text(encoding="utf-8")
 check("pygfx: VR re-toggle keeps Territoryモード (_vr_retoggle guard)",
       "self._vr_retoggle = True" in src
       and 'not getattr(self, "_vr_retoggle", False)' in src)
+
+# row 3: a long file name is shortened (…), the whole name in its tooltip
+long_nm = "Case-with-a-very-long-name_20261127_Se006_final.FullLv.json"
+sh.state["full"] = long_nm
+v.refresh_ct_mode_bar()
+lb_full = v._ct_file_lbls["full"]
+check("row 3: a long name is shortened, the whole name in the tooltip",
+      "…" in lb_full.text() and long_nm not in lb_full.text()
+      and lb_full.toolTip() == long_nm, (lb_full.text(), lb_full.toolTip()))
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

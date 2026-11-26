@@ -3,10 +3,11 @@ steps of every mode), LV / CoronaryTree = only that mode's tools; row order
 LV → CoronaryTree → Territory (the row-1 mode order) with ONE 「LV:」 caption.
 
   Simple View : LV MV-AoV+Apex / Epi / Blood/Endo / FullLV,
-                CoronaryTree Load / CPR, Territory Calc / Load
-  LVモード     : LV steps + 壁厚3D / 壁厚短軸 / CoronaryTree (no Coronary group,
-                no Territory group)
-  CoronaryTree : Load / CPR / Open VR / 回転連動 + Territory Calc (no LV)
+                CoronaryTree Load / CPR
+  LVモード     : LV steps + 壁厚3D / 壁厚短軸 / CoronaryTree (no Coronary group)
+  CoronaryTree : Load / CPR / Open VR / 回転連動 (no LV)
+  Territory Calc / Load / Save: row 3 (読込ファイル), every mode (2026-11-27):
+  FullLv ＋ corotree ▶ [Territory Calc] territory [Load] [Save]
 
     python tools/test_ct_row2_by_mode.py
 """
@@ -70,9 +71,9 @@ def state():
         "coro": all(shown(w) for w in (v._coro_cap, v._coro_load_btn,
                                        v._coronary_mpr_btn)),
         "vr": any(shown(w) for w in (v._cpr_vr_group or [])),
-        "terr": shown(v._ct_terr_wrap) and shown(v._ct_terr_btn),
-        "terr_load": shown(v._ct_terr_wrap) and shown(v._ct_terr_load_btn),
-        "terr_save": shown(v._ct_terr_wrap) and shown(v._ct_terr_save_btn),
+        "terr": shown(v._ct_terr_btn) and shown(v._ct_files_wrap),
+        "terr_load": shown(v._ct_terr_load_btn),
+        "terr_save": shown(v._ct_terr_save_btn),
         "lv_caps": sum(shown(w) for w in (v._lv_cap, v._ctlv_cap)),
     }
 
@@ -82,36 +83,50 @@ row1 = v._lv_wrap.layout().itemAt(0).layout()
 pos = {n: row1.indexOf(w) for n, w in (
     ("lv_cap", v._lv_cap), ("mv", v._lv_mv_btn), ("full", v._full_lv_btn),
     ("thick3d", v._ctlv_thick3d_btn), ("tree", v._ctlv_tree_btn),
-    ("coro_cap", v._coro_cap), ("cpr", v._coronary_mpr_btn),
-    ("terr", v._ct_terr_wrap))}
-check("order: LV steps → LV view tools → CoronaryTree → Territory",
+    ("coro_cap", v._coro_cap), ("cpr", v._coronary_mpr_btn))}
+check("order: LV steps → LV view tools → CoronaryTree",
       0 <= pos["lv_cap"] < pos["mv"] < pos["full"] < pos["thick3d"]
-      < pos["tree"] < pos["coro_cap"] < pos["cpr"] < pos["terr"], pos)
+      < pos["tree"] < pos["coro_cap"] < pos["cpr"], pos)
+check("Territory no longer in row 1", row1.indexOf(v._ct_terr_btn) < 0
+      and row1.indexOf(v._ct_terr_load_btn) < 0)
+r3 = v._ct_files_wrap.layout()
+p3 = {n: r3.indexOf(w) for n, w in (
+    ("full", v._ct_file_lbls["full"]), ("tree", v._ct_file_lbls["tree"]),
+    ("calc", v._ct_terr_btn), ("terr", v._ct_file_lbls["terr"]),
+    ("terr_x", v._ct_unload_btns["terr"]), ("load", v._ct_terr_load_btn),
+    ("save", v._ct_terr_save_btn))}
+check("row 3: FullLv ＋ corotree ▶ [Territory Calc] territory ⊗ [Load] [Save]",
+      0 <= p3["full"] < p3["tree"] < p3["calc"] < p3["terr"] < p3["terr_x"]
+      < p3["load"] < p3["save"], p3)
+seps = [r3.itemAt(i).widget().text() for i in range(r3.count())
+        if r3.itemAt(i).widget() is not None
+        and r3.itemAt(i).widget().text() in ("&nbsp;＋&nbsp;", "&nbsp;▶&nbsp;")]
+check("row 3 separators: ＋ then ▶", seps == ["&nbsp;＋&nbsp;", "&nbsp;▶&nbsp;"],
+      seps)
 
 # ---- Simple View ----------------------------------------------------------
 v._ct_switch_inplace("standard")
 st = state()
-check("Simple View: LV steps + CoronaryTree Load/CPR + Territory Calc/Load",
-      st["lv"] and st["coro"] and st["terr"] and st["terr_load"], st)
-check("Simple View: no LV view tools / Open VR / Territory Save",
-      not st["lv_view"] and not st["vr"] and not st["terr_save"], st)
+check("Simple View: LV steps + CoronaryTree Load/CPR + Territory (row 3)",
+      st["lv"] and st["coro"] and st["terr"] and st["terr_load"]
+      and st["terr_save"], st)
+check("Simple View: no LV view tools / Open VR",
+      not st["lv_view"] and not st["vr"], st)
 
 # ---- LVモード --------------------------------------------------------------
 v._ct_switch_inplace("lv")
 st = state()
 check("LVモード: LV steps + view tools, ONE 「LV:」 caption",
       st["lv"] and st["lv_view"] and st["lv_caps"] == 1, st)
-check("LVモード: no CoronaryTree / Territory group",
-      not st["coro"] and not st["vr"] and not st["terr"], st)
+check("LVモード: no CoronaryTree group; Territory (row 3) still there",
+      not st["coro"] and not st["vr"] and st["terr"] and st["terr_load"], st)
 
 # ---- CoronaryTreeモード ----------------------------------------------------
 v._ct_switch_inplace("coronary")
 st = state()
-check("CoronaryTreeモード: Load/CPR/Open VR + Territory Calc",
-      st["coro"] and st["vr"] and st["terr"], st)
-check("CoronaryTreeモード: no LV, no Territory Load/Save",
-      not st["lv"] and not st["lv_view"] and not st["terr_load"]
-      and not st["terr_save"], st)
+check("CoronaryTreeモード: Load/CPR/Open VR + Territory (row 3)",
+      st["coro"] and st["vr"] and st["terr"] and st["terr_load"], st)
+check("CoronaryTreeモード: no LV", not st["lv"] and not st["lv_view"], st)
 
 # ---- back to Simple View --------------------------------------------------
 v._ct_switch_inplace("standard")
@@ -158,8 +173,9 @@ v._lvv_blood_comp = None
 
 # ---- Calc enable rule + Mac parity ----------------------------------------
 src = (ROOT / "multi_dicomviewer/viewers/ct_mode_bar.py").read_text(encoding="utf-8")
-check("Calc enabled in Simple View + CoronaryTreeモード",
-      'tb.setEnabled(cur in ("coronary", "standard")' in src)
+check("Calc enabled in every mode once a tree + an LV exist",
+      "tb.setEnabled(has_tree and has_lv)" in src
+      and 'cur in ("coronary", "standard")' not in src)
 mac = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text(encoding="utf-8")
 check("Mac: same mode rule + row order",
       "ctx = self._ct_bar_ctx()" in mac and "self._ct_bar_reorder(row1)" in mac)

@@ -93,13 +93,12 @@ ix = [x.mapTo(v, x.rect().topLeft()).x() for x in seq]
 check("LV row order: Load, MV-AoV+Apex, 心外膜, Blood/Endo, FullLV",
       all(x.isVisible() for x in seq) and ix == sorted(ix)
       and len(set(ix)) == 5, ix)
-g = v._ct_terr_button()
-tl = g.layout()
+tl = v._ct_files_wrap.layout()
 names = [tl.itemAt(i).widget().text() for i in range(tl.count())
          if tl.itemAt(i).widget() is not None]
-check("Territory order: Load, Calc, Save",
-      [n for n in names if n in ("Load", "Calc", "Save")]
-      == ["Load", "Calc", "Save"], names)
+check("Territory order (row 3): Territory Calc, then Load, Save",
+      [n for n in names if n in ("Load", "Territory Calc", "Save")]
+      == ["Territory Calc", "Load", "Save"], names)
 opened = []
 import PyQt6.QtWidgets as _QW  # noqa: E402
 _QW.QFileDialog.getOpenFileName = staticmethod(

@@ -14,10 +14,12 @@ Four mode buttons sit right of 3D/2D on the Plane bar (row 1):
 
 Every switch is IN PLACE (the CT is never re-opened): 標準 / LV / CoronaryTree
 hide / restore overlays (data kept); the Territory review lays the panes on the
-LV axis + VR and leaving it restores the previous view. 「Territory計算」 (shown
-in CoronaryTreeモード only) computes the territory from the in-session LV (else
+LV axis + VR and leaving it restores the previous view. 「Territory Calc」 sits
+in row 3 between its inputs and its result — 読込ファイル: FullLv ＋ corotree ▶
+[Territory Calc] territory [Load] [Save] (user 2026-11-27) — in every mode once
+an LV and a tree exist; it computes the territory from the in-session LV (else
 the docked FullLv) + the tree via the shell (``shell.ct_territory_compute``) and
-enters the review. Availability comes from the viewer's own in-session LV data
+enters the review (in the review = recompute). Availability comes from the viewer's own in-session LV data
 plus what the Coronary Tree dock holds (``shell.ct_mode_state``). Auto: an LV
 edit step → LVモード; the CPR button / ツリー登録 / editing a tree line →
 CoronaryTreeモード. A row-3 readout names the FullLv / corotree (or 計測済み /
@@ -48,7 +50,7 @@ _CT_MODES = (
      "自動的に入ります"),
     ("territory", "Territoryモード",
      "Territoryモード：灌流領域 + VR の表示。Territory を計算済みのとき有効"
-     "（計算は CoronaryTreeモードの「Territory計算」）"),
+     "（計算は 3行目「読込ファイル」の「Territory Calc」）"),
 )
 
 _TERR_BTN_TIP = (
@@ -99,8 +101,8 @@ class CTModeBarMixin:
             b.clicked.connect(lambda _c, k=key: self._ct_mode_clicked(k))
             self._ct_mode_btns[key] = b
             row.addWidget(b)
-        # 「Territory計算」 is not a mode: it sits at the right end of the
-        # Coronary / VR / LV row (the viewers place it there).
+        # 「Territory Calc / Load / Save」 are not modes: they sit in row 3
+        # (読込ファイル) between the FullLv + corotree and the territory.
         self._ct_terr_button()
         # 結果文字サイズ (user 2026-11-25): ONE size for every result text on
         # BOTH panes — WW/WL, the angle, the pane kind (A | MPR), measure /
@@ -426,8 +428,13 @@ class CTModeBarMixin:
             return -1
         i_cor = idx(getattr(self, "_coro_cap", None), items)
         i_sp = idx(getattr(self, "_coro_spacer_w", None), items)
-        i_terr = idx(getattr(self, "_ct_terr_wrap", None), items)
-        if min(i_cor, i_sp, i_terr) < 0 or not (i_cor < i_sp < i_terr):
+        _tw = getattr(self, "_ct_terr_wrap", None)
+        i_terr = idx(_tw, items) if _tw is not None else -1
+        if i_terr < 0:                           # Territory moved to row 3:
+            i_terr = len(items)                  # the trailing stretch stays last
+            while i_terr > i_sp + 1 and items[i_terr - 1].widget() is None:
+                i_terr -= 1
+        if min(i_cor, i_sp) < 0 or not (i_cor < i_sp < i_terr + 1):
             for it in items:                     # unexpected layout → unchanged
                 row.addItem(it)
             return
@@ -436,8 +443,10 @@ class CTModeBarMixin:
                 and it.widget() is not getattr(self, "_ctlv_cap", None)]
         coro = items[i_cor:i_sp]
         spacer = items[i_sp]
-        t_start = i_terr - 1 if (i_terr > 0 and items[i_terr - 1].widget()
-                                 is None) else i_terr
+        t_start = i_terr - 1 if (i_terr > i_sp + 1 and i_terr < len(items)
+                                 and items[i_terr - 1].widget() is None
+                                 and items[i_terr].widget() is not None) \
+            else i_terr
         lv = items[i_sp + 1:t_start]
         terr = items[t_start:]
         at = idx(getattr(self, "_lv_file_label", None), lv)
@@ -465,66 +474,44 @@ class CTModeBarMixin:
         return m if m in ("lv", "coronary") else "both"
 
     def _ct_terr_group_sync(self) -> None:
-        """「Territory:」 group in the LV bar: Simple View = Calc + Load,
-        CoronaryTreeモード = Calc (the tree's next step), LVモード = hidden;
-        Save lives in the Territory review bar."""
-        wrap = getattr(self, "_ct_terr_wrap", None)
-        if wrap is None:
-            return
-        m = self._ct_current_mode()
-        show = m in ("standard", "coronary")
-        if wrap.isHidden() == show:
-            wrap.setVisible(show)
-        lb = getattr(self, "_ct_terr_load_btn", None)
-        if lb is not None and lb.isHidden() == (m == "standard"):
-            lb.setVisible(m == "standard")
-        sb = getattr(self, "_ct_terr_save_btn", None)
-        if sb is not None and not sb.isHidden():
-            sb.setVisible(False)
+        """Territory Calc / Load / Save live in row 3 and show in every mode
+        (Calc / Save enabled by the data, see refresh_ct_mode_bar)."""
+        for nm in ("_ct_terr_btn", "_ct_terr_load_btn", "_ct_terr_save_btn"):
+            b = getattr(self, nm, None)
+            if b is not None and b.isHidden():
+                b.setVisible(True)
 
     def _ct_terr_button(self):
-        """The 「Territory: Calc / Load / Save」 group, made once and placed by the
-        viewer at the right end of its Coronary / VR / LV row. Calc (=
-        Territory計算) works in CoronaryTreeモード only (the tree is the
-        prerequisite); Load opens a .territory.json; Save writes one (needs a
-        computed Territory). Returns the group widget; the Calc button is
-        ``_ct_terr_btn``."""
-        wrap = getattr(self, "_ct_terr_wrap", None)
-        if wrap is None:
-            wrap = QWidget()
-            row = QHBoxLayout(wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(4)
-            cap = QLabel(t("Territory:"))
-            f = cap.font()
-            f.setBold(True)
-            cap.setFont(f)
-            row.addWidget(cap)
-            # Load, Calc, Save — Load first like the LV row (user 2026-11-25)
-            lb = FitButton(t("Load"))
-            lb.setHelpToolTip(t(_TERR_LOAD_TIP))
-            lb.clicked.connect(lambda _c=False: self._ct_territory_load_clicked())
-            row.addWidget(lb)
-            tb = FitButton(t("Calc"))
+        """Make the 「Territory Calc」 / 「Load」 / 「Save」 buttons once (placed
+        in row 3 by _build_ct_files_line: FullLv ＋ corotree ▶ [Territory
+        Calc] territory [Load] [Save]). Calc needs an LV (in-session or a
+        FullLv) and a tree; Load opens a .territory.json; Save writes one
+        (needs a computed Territory). Returns the Calc button
+        (``_ct_terr_btn``)."""
+        tb = getattr(self, "_ct_terr_btn", None)
+        if tb is None:
+            tb = FitButton(t("Territory Calc"))
             tb.setHelpToolTip(t(_TERR_BTN_TIP))
             tb.setStyleSheet(_TERR_BTN_CSS)
             tb.clicked.connect(
                 lambda _c=False: self._ct_territory_compute_clicked())
-            row.addWidget(tb)
+            lb = FitButton(t("Load"))
+            lb.setHelpToolTip(t(_TERR_LOAD_TIP))
+            lb.clicked.connect(lambda _c=False: self._ct_territory_load_clicked())
             sb = FitButton(t("Save"))
             sb.setHelpToolTip(t(_TERR_SAVE_TIP))
             sb.clicked.connect(lambda _c=False: self._ct_territory_save_clicked())
-            row.addWidget(sb)
             self._ct_terr_btn = tb
             self._ct_terr_load_btn = lb
             self._ct_terr_save_btn = sb
-            self._ct_terr_wrap = wrap
-        return wrap
+            self._ct_terr_wrap = None            # no row-1 group any more
+        return tb
 
     def _build_ct_files_line(self) -> QWidget:
         """The row-3 readout of the loaded .FullLv.json / .corotree.json /
         .territory.json — each name followed by an Unload (red ⊗) button
-        (user 2026-11-17)."""
+        (user 2026-11-17) — read as inputs → Calc → result (user 2026-11-27):
+        FullLv ⊗ ＋ corotree ⊗ ▶ [Territory Calc] territory ⊗ [Load] [Save]."""
         from PyQt6.QtWidgets import QToolButton
         w = QWidget()
         row = QHBoxLayout(w)
@@ -538,12 +525,16 @@ class CTModeBarMixin:
         self._ct_unload_btns = {}
         self._ct_file_off = {}                   # kind → Unloaded (↻ shown)
         icon = self._ct_unload_icon()
+        self._ct_terr_button()                   # Calc / Load / Save
         for i, kind in enumerate(("full", "tree", "terr")):
             if i:
-                sep = QLabel("&nbsp;／&nbsp;")
+                sep = QLabel("&nbsp;＋&nbsp;" if i == 1 else "&nbsp;▶&nbsp;")
                 sep.setTextFormat(Qt.TextFormat.RichText)
                 sep.setStyleSheet(sty)
                 row.addWidget(sep)
+            if kind == "terr":                   # inputs ▶ Calc ▶ result
+                row.addWidget(self._ct_terr_btn)
+                row.addSpacing(6)
             lb = QLabel("")
             lb.setStyleSheet(sty)
             lb.setTextFormat(Qt.TextFormat.RichText)
@@ -558,6 +549,9 @@ class CTModeBarMixin:
             row.addWidget(b)
             self._ct_file_lbls[kind] = lb
             self._ct_unload_btns[kind] = b
+        row.addSpacing(6)                        # the territory file's own
+        row.addWidget(self._ct_terr_load_btn)    # Load / Save
+        row.addWidget(self._ct_terr_save_btn)
         row.addStretch(1)
         self._ct_files_wrap = w
         return w
@@ -731,11 +725,21 @@ class CTModeBarMixin:
                 b.setChecked(key == cur)
         tb = getattr(self, "_ct_terr_btn", None)
         if tb is not None:
-            # Calc: Simple View / CoronaryTreeモード (+ a tree and an LV / FullLv).
-            tb.setEnabled(cur in ("coronary", "standard") and bool(
-                state.get("tree") or state.get("tree_mem"))
-                and (self._ct_lv_ready() or bool(full)
-                     or bool(state.get("full_mem"))))
+            # Calc: any mode (in the review = recompute) once a tree and an
+            # LV / FullLv exist; the tooltip names what is missing.
+            has_tree = bool(state.get("tree") or state.get("tree_mem"))
+            has_lv = (self._ct_lv_ready() or bool(full)
+                      or bool(state.get("full_mem")))
+            tb.setEnabled(has_tree and has_lv)
+            miss = [x for x, ok in ((t("FullLv（または LV 計測）"), has_lv),
+                                    (t("corotree（冠動脈ツリー）"), has_tree))
+                    if not ok]
+            tip = t(_TERR_BTN_TIP)
+            if miss:
+                tip += "\n\n" + t("足りないもの: {m}", m=t("・").join(miss))
+            if tb.property("ct_tip") != tip:
+                tb.setProperty("ct_tip", tip)
+                tb.setHelpToolTip(tip)
         for nm in ("_ct_terr_save_btn", "_terr_save_btn2"):
             b = getattr(self, nm, None)
             if b is not None:
@@ -790,11 +794,16 @@ class CTModeBarMixin:
                 if v_ == "*":
                     off[k_] = t("計算済み（未保存）")
 
+            def short(s_, n=34):
+                s_ = str(s_ or "")
+                return s_ if len(s_) <= n else (s_[:n // 2 - 1] + "…"
+                                                + s_[-(n - n // 2):])
+
             def part(name, text, modified, grey=None):
                 if grey:
                     return ("<span style='color:#a0a0a0;'>" + html.escape(name)
-                            + ": " + html.escape(grey) + "</span>")
-                s_ = html.escape(text or none)
+                            + ": " + html.escape(short(grey)) + "</span>")
+                s_ = html.escape(short(text or none))
                 if modified:
                     s_ += ("<span style='color:#d2691e;'>（" + mod
                            + "）</span>")
@@ -810,6 +819,9 @@ class CTModeBarMixin:
                 grey = off.get(kind) if not is_file else None
                 if kind in lbls:
                     lbls[kind].setText(part(name, text, modified, grey))
+                    full_nm = str(grey or text or "")
+                    if lbls[kind].toolTip() != full_nm:
+                        lbls[kind].setToolTip(full_nm)   # the whole name
                 if kind in btns:
                     # ⊗ next to a loaded FILE; ↻ next to an Unloaded one;
                     # nothing for 未保存 / なし.
@@ -1033,11 +1045,22 @@ class CTModeBarMixin:
 
     # ------------------------------------------------- Territory (in place)
     def _ct_territory_compute_clicked(self) -> None:
-        """「Territory計算」 (CoronaryTreeモード): the shell computes the territory
-        from this CT's LV + tree and calls back _ct_territory_enter."""
+        """「Territory Calc」 (row 3, any mode): the shell computes the territory
+        from this CT's LV + tree and calls back _ct_territory_enter. In the
+        Territory review it is a recompute (the review is left first); while
+        an LV step is being edited it asks to finish that first."""
         shell = self._ct_mode_shell()
         if shell is None or not hasattr(shell, "ct_territory_compute"):
             return
+        if hasattr(self, "_lv_mode_active") and self._lv_mode_active():
+            self._ct_lv_editing_msg()
+            return
+        if self._ct_current_mode() == "territory":
+            try:
+                self._ct_territory_leave()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
         try:
             shell.ct_territory_compute(self)
         except Exception:                                # noqa: BLE001
@@ -1393,7 +1416,7 @@ class CTModeBarMixin:
         self._refresh(reset_cam=False)
         self._territory_display = True
         for fn in ("_cpr_mark_full_lv", "_refresh_tool_availability",
-                   "_terr_bar_sync"):
+                   "_terr_bar_sync", "_update_active_frames"):
             try:
                 getattr(self, fn)()
             except Exception:                    # noqa: BLE001
@@ -1426,7 +1449,8 @@ class CTModeBarMixin:
         if lvd is not None:
             self._lvv_lvd_shown = bool(lvd)
             self._ct_terr_lvd = None
-        for fn in ("_refresh_tool_availability", "_terr_bar_sync"):
+        for fn in ("_refresh_tool_availability", "_terr_bar_sync",
+                   "_update_active_frames"):
             try:
                 getattr(self, fn)()
             except Exception:                    # noqa: BLE001
