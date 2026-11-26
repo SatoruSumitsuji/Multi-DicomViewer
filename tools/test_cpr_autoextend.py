@@ -502,10 +502,12 @@ rn_ = extend_vessel(noise(v, 5), D3, ctrl)
 tpn = rn_.trunk.path if rn_.trunk is not None else np.zeros((2, 3))
 spn = np.linalg.norm(np.diff(tpn, axis=0), axis=1)
 # (a faint ROUND narrowing is now usually taken as the vessel itself —
-# "faint round lumen", user 2026-11-25 — else it is bridged)
+# "faint round lumen", user 2026-11-25, or its HU peak, 2026-11-26 — else
+# it is bridged)
 check("a short narrowing is bridged, steps still 3 mm",
       tpn[-1][2] > 70 and spn.max() < 3.4
-      and any(e.get("event") in ("bridged a narrowing", "faint round lumen")
+      and any(e.get("event") in ("bridged a narrowing", "faint round lumen",
+                                 "HU peak")
               for e in rn_.log),
       (tpn[-1].round(1), round(float(spn.max()), 2)))
 # why it stopped: the last 3 mm section's regions and why each was not
@@ -514,10 +516,12 @@ from multi_dicomviewer.core.cpr_autoextend import stop_detail  # noqa: E402
 v = new()
 tube(v, [30, 30, 5], [30, 30, 40], 1.5)
 tube(v, [30, 30, 40], [30, 30, 75], 1.5, hu=240.0)
-# (the faint-but-round search would follow it: off, to test the report)
+# (the faint-but-round / HU-peak searches would follow it: off, to test
+# the report)
 rf_ = extend_vessel(noise(v, 6), D3, ctrl,
                     prm=CAE.ExtendParams(ask_at_fork=False,
-                                         round_rescue=False))
+                                         round_rescue=False,
+                                         peak_rescue=False))
 dt_ = stop_detail(rf_.log)
 txt_ = CoronaryTreeWindow.auto_extend_text(
     "x", {"trunk_mm": 10.0, "branches": [], "stop": rf_.stop, "detail": dt_})

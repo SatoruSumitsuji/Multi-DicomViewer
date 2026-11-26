@@ -63,7 +63,8 @@ def run(vol, **kw):
     return end, off, ev
 
 
-OFF = dict(round_rescue=False)                   # the rescue switched off
+# the rescues switched off (the HU-peak one, 2026-11-26, follows it too)
+OFF = dict(round_rescue=False, peak_rescue=False)
 for seed in (0, 1):
     vol = make(190.0, seed=seed)
     e0, _o0, _ = run(vol, **OFF)
@@ -71,7 +72,8 @@ for seed in (0, 1):
     check(f"seed {seed}: without it the trace stops where the contrast drops",
           e0 < 30.0, e0)
     check(f"seed {seed}: with it the faint round vessel is followed on",
-          e1 > 50.0 and "faint round lumen" in ev, (e1, ev[:4]))
+          e1 > 50.0 and ("faint round lumen" in ev or "HU peak" in ev),
+          (e1, ev[:4]))
     check(f"seed {seed}: … on its centre (< 0.5 mm)", o1 < 0.5, o1)
 
 # a vessel that simply ends: no rescue into the background

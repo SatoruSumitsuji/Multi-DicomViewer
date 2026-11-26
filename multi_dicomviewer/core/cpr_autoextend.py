@@ -104,6 +104,31 @@ class ExtendParams:
     # instead of stopping (going proximally the wider one is the parent).
     trunk_only: bool = False
     fork_take_wider: bool = False
+    # PEAK rescue (user 2026-11-26): when nothing is found with the
+    # thresholds of the lumen so far (a vessel suddenly fainter / thinner,
+    # or merged with the myocardium beside it at a low threshold), the HU
+    # PEAKS are searched — first in the section step_mm ahead, then (a
+    # hairpin) on the sphere of ray_mm round the point up to hairpin_deg
+    # off the course. A peak counts when ≥ bg + peak_min_contrast and
+    # peak_min_prom above its surroundings (the darker quarter of the ring
+    # just outside — the myocardium on one side does not lift it), joined
+    # to the point (its own half-way HU) and not on a traced line; its
+    # extent / roundness come from ITS half-max (16 rays: a ray into the
+    # myocardium that never drops is only a minus, not a veto). The best
+    # by score = HU + closeness to the course (angle) + roundness is taken;
+    # the lumen reference is left as it is (it is looked for again at every
+    # step it is needed).
+    peak_rescue: bool = True
+    peak_min_contrast: float = 100.0  # peak ≥ bg + this (a 100 HU blob: no)
+    peak_min_prom: float = 40.0      # … and ≥ this above its surroundings
+    peak_smooth_mm: float = 0.25     # (light: a thin vessel's peak survives)
+    peak_conn_frac: float = 0.4
+    peak_w_hu: float = 0.5
+    peak_w_ang: float = 0.25
+    peak_w_round: float = 0.25
+    peak_min_closed: float = 0.55    # rays that drop to half-max (fraction)
+    peak_min_radius_mm: float = 0.45
+    peak_max_radius_mm: float = 2.5
     round_frac: float = 0.25
     round_max_ratio: float = 1.6
     round_min_local_hu: float = 50.0
@@ -321,6 +346,84 @@ def _ring_hu(V, c, d, rad, n=24):
     pts = (np.asarray(c, float)[None] + rad * (np.cos(a)[:, None] * u
                                               + np.sin(a)[:, None] * v))
     return float(np.median(V.sample(pts)))
+
+
+def _peak_lumen(V, c0, n, bg, R=3.0, h=0.25, find_mm=1.0, n_rays=16,
+                smooth_mm=0.25):
+    """The lumen round an HU peak near *c0* in the section ⟂ *n* (PEAK
+    rescue): the peak (0.5 mm smoothed) within *find_mm* of *c0*, its
+    half-max level (half-way between *bg* and the peak), the radius where
+    each of *n_rays* rays drops below it (None = never within *R*: the
+    myocardium / a chamber that way), the centre (weighted, above the
+    half-max inside the mean radius). None when there is no peak."""
+    u, v = _frame(n)
+    g = np.arange(-R, R + 1e-6, h)
+    A, B = np.meshgrid(g, g, indexing="ij")
+    c0 = np.asarray(c0, float)
+    img = ndimage.gaussian_filter(
+        V.sample(c0 + A[..., None] * u + B[..., None] * v), smooth_mm / h)
+    near = np.hypot(A, B) <= find_mm
+    k = int(np.argmax(np.where(near, img, -1e9)))
+    i0, j0 = np.unravel_index(k, img.shape)
+    peak = float(img[i0, j0])
+    if peak <= bg:
+        return None
+    a0, b0 = float(A[i0, j0]), float(B[i0, j0])
+    half = bg + 0.5 * (peak - bg)
+    ts = np.arange(h, R + 1e-6, h / 2.0)
+    radii = []
+    for ang in np.linspace(0.0, 2.0 * np.pi, n_rays, endpoint=False):
+        ca, sa = np.cos(ang), np.sin(ang)
+        ia = (a0 + ts * ca + R) / h
+        jb = (b0 + ts * sa + R) / h
+        prof = ndimage.map_coordinates(img, [ia, jb], order=1,
+                                       mode="nearest")
+        below = np.nonzero(prof < half)[0]
+        if len(below) == 0:
+            radii.append(None)
+            continue
+        q = int(below[0])
+        if q == 0:
+            radii.append(float(ts[0]))
+            continue
+        p1, p2 = float(prof[q - 1]), float(prof[q])
+        f = (p1 - half) / (p1 - p2) if p1 != p2 else 0.0
+        radii.append(float(ts[q - 1] + f * (ts[q] - ts[q - 1])))
+    closed = [x for x in radii if x is not None]
+    frac = len(closed) / float(n_rays)
+    if not closed:
+        return {"c": c0 + a0 * u + b0 * v, "peak": peak, "r": R,
+                "closed": 0.0, "round": 0.0, "prom": 0.0}
+    rm = float(np.mean(closed))
+    # how far it stands out: the darker quarter of the ring 1 mm outside
+    ra = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+    ring = ndimage.map_coordinates(
+        img, [(a0 + (rm + 1.0) * np.cos(ra) + R) / h,
+              (b0 + (rm + 1.0) * np.sin(ra) + R) / h], order=1,
+        mode="nearest")
+    prom = peak - float(np.percentile(ring, 25))
+    cv = float(np.std(closed) / rm) if rm > 1e-6 else 1.0
+    # the centre from opposite ray pairs that BOTH close (a side running
+    # into the myocardium does not pull it over)
+    angs = np.linspace(0.0, 2.0 * np.pi, n_rays, endpoint=False)
+    sa_, sb_, m_ = 0.0, 0.0, 0
+    for i in range(n_rays // 2):
+        r1, r2 = radii[i], radii[i + n_rays // 2]
+        if r1 is None or r2 is None:
+            continue
+        off = 0.5 * (r1 - r2)
+        sa_ += off * np.cos(angs[i])
+        sb_ += off * np.sin(angs[i])
+        m_ += 1
+    if m_:
+        # each pair moves the centre along its own axis: 2/m for the mean
+        ca_ = a0 + 2.0 * sa_ / m_
+        cb_ = b0 + 2.0 * sb_ / m_
+    else:
+        ca_, cb_ = a0, b0
+    return {"c": c0 + ca_ * u + cb_ * v, "peak": peak, "r": rm,
+            "closed": frac, "round": float(frac * max(0.0, 1.0 - cv)),
+            "prom": prom}
 
 
 def _smooth_min(val, k=3):
@@ -549,6 +652,86 @@ class _Tracer:
                         "s": prm.step_mm, "how": "round"})
         return out
 
+    def _peak_cands(self, P, d, lumen, own):
+        """PEAK rescue (see ExtendParams.peak_*): [the best candidate] or
+        []. Stage 1 = the section step_mm ahead (its disc reaches ~60° off
+        the course), stage 2 (nothing there — a hairpin) = the sphere of
+        ray_mm round *P* up to hairpin_deg."""
+        prm = self.p
+        gate = self.bg + prm.peak_min_contrast
+        found = []
+
+        def judge(pk, how):
+            if pk is None or pk["peak"] < gate                     or pk.get("prom", 0.0) < prm.peak_min_prom:
+                return
+            c = pk["c"]
+            if not (prm.peak_min_radius_mm <= pk["r"]
+                    <= prm.peak_max_radius_mm):
+                return
+            if pk["closed"] < prm.peak_min_closed:
+                return                       # a chamber / a band, not round
+            w = _unit(c - P)
+            ang = _angle(w, d)
+            if ang > prm.hairpin_deg:
+                return                       # no going back
+            if _seg_min(self.V, P, c) <= self.bg + prm.peak_conn_frac * (
+                    pk["peak"] - self.bg):
+                return                       # not joined to the point
+            if self._traced(c, own):
+                return                       # an already traced line
+            ref = max(lumen - self.bg, prm.peak_min_contrast)
+            sc = (prm.peak_w_hu * min(1.2, (pk["peak"] - self.bg) / ref)
+                  + prm.peak_w_ang * (1.0 - ang / prm.hairpin_deg)
+                  + prm.peak_w_round * pk["round"])
+            found.append({"c": c, "w": w, "r": pk["r"], "hu": pk["peak"],
+                          "ang": ang, "s": float(np.linalg.norm(c - P)),
+                          "how": "peak", "stage": how,
+                          "round": round(pk["round"], 2),
+                          "score": round(float(sc), 3)})
+
+        # stage 1: the peaks of the section step_mm ahead
+        Q = P + prm.step_mm * d
+        u, v = _frame(d)
+        R, h = prm.search_mm, prm.grid_mm
+        g = np.arange(-R, R + 1e-6, h)
+        A, B = np.meshgrid(g, g, indexing="ij")
+        img = ndimage.gaussian_filter(
+            self.V.sample(Q + A[..., None] * u + B[..., None] * v),
+            prm.peak_smooth_mm / h)
+        k = max(3, int(round(1.0 / h)) * 2 + 1)
+        mx = ndimage.maximum_filter(img, size=k)
+        pk_ij = np.argwhere((img >= mx - 1e-6) & (img >= gate)
+                            & (np.hypot(A, B) <= R))
+        pk_ij = sorted(pk_ij.tolist(), key=lambda ij: -img[ij[0], ij[1]])[:8]
+        for i, j in pk_ij:
+            judge(_peak_lumen(self.V, Q + A[i, j] * u + B[i, j] * v, d,
+                              self.bg, find_mm=0.75,
+                              smooth_mm=prm.peak_smooth_mm), "section")
+        if not found:
+            # stage 2 (a hairpin): peaks on the sphere of ray_mm round P
+            cs = _DIRS @ _unit(d)
+            W = _DIRS[cs >= np.cos(np.radians(prm.hairpin_deg))]
+            if len(W):
+                off = np.array([[0, 0, 0], [0.4, 0, 0], [-0.4, 0, 0],
+                                [0, 0.4, 0], [0, -0.4, 0], [0, 0, 0.4],
+                                [0, 0, -0.4]], float)
+                X = P[None, None] + prm.ray_mm * W[:, None] + off[None]
+                val = self.V.sample(X).mean(axis=1)
+                cw = W @ W.T
+                nb = cw >= np.cos(np.radians(14.0))
+                is_pk = np.array([val[i] >= val[nb[i]].max() - 1e-6
+                                  for i in range(len(W))])
+                idx = [i for i in np.argsort(-val)
+                       if is_pk[i] and val[i] >= gate][:6]
+                for i in idx:
+                    judge(_peak_lumen(self.V, P + prm.ray_mm * W[i], W[i],
+                                      self.bg, find_mm=1.0,
+                                      smooth_mm=prm.peak_smooth_mm),
+                          "sphere")
+        if not found:
+            return []
+        return [max(found, key=lambda c: c["score"])]
+
     def _conn(self, lumen) -> float:
         return self.bg + self.p.conn_frac * (lumen - self.bg)
 
@@ -672,11 +855,27 @@ class _Tracer:
                              "hu": round(c["hu"], 1),
                              "ang": round(c["ang"], 1), "s": c["s"],
                              "how": c["how"]} for c in cands]
+            if chamber and not cands and prm.peak_rescue:
+                # merged with the myocardium / a chamber at this threshold:
+                # a round HU peak there is still the vessel
+                cands = self._peak_cands(P, d, lumen, own)
+                if cands:
+                    chamber = False
+                    rec["event"] = "HU peak (beside a wide region)"
             if chamber and not cands:
                 stop = "widening"
                 rec["event"] = "chamber ahead"
                 self.log.append(rec)
                 break
+            if not cands and not chamber and prm.peak_rescue:
+                # fainter / thinner than the lumen so far, or merged with
+                # the myocardium: the best HU peak (HU + course + round) —
+                # before the rays, whose "bright all the way" test lets the
+                # myocardium pass once the reference has come down; the
+                # peak search's sphere stage covers a hairpin too
+                cands = self._peak_cands(P, d, lumen, own)
+                if cands:
+                    rec["event"] = "HU peak"
             if not cands and not chamber:
                 # a hairpin: the lumen goes on sideways (connected rays)
                 cands = self._ray_cands(P, d, thr, lumen, 0.0,
@@ -686,6 +885,12 @@ class _Tracer:
                     rec["cands"] = [{"c": _r3(c["c"]), "r": round(c["r"], 2),
                                      "ang": round(c["ang"], 1),
                                      "how": c["how"]} for c in cands]
+            if cands and cands[0].get("how") == "peak":
+                rec["cands"] = [{"c": _r3(c["c"]), "r": round(c["r"], 2),
+                                 "hu": round(c["hu"], 1),
+                                 "ang": round(c["ang"], 1), "how": "peak",
+                                 "stage": c["stage"], "round": c["round"],
+                                 "score": c["score"]} for c in cands]
             if not cands and not chamber and prm.round_rescue:
                 # faint but round: still the vessel
                 cands = self._round_cands(P, d, lumen, r, own)
@@ -704,7 +909,8 @@ class _Tracer:
                     break
                 cands = [br]
                 rec["event"] = "bridged a narrowing"
-            if starting or rec.get("event") == "sharp bend (rays)":
+            if starting or rec.get("event") == "sharp bend (rays)" \
+                    or cands[0].get("how") == "peak":
                 # a branch still beside its parent / a hairpin: the region nearest the
                 # predicted point, no new branches yet
                 main = min(cands, key=lambda c: c["ang"])
@@ -743,7 +949,7 @@ class _Tracer:
                     seeds.append({"P": P.copy(), "w": c["w"], "r": c["r"],
                                   "Q": c["c"]})
             g = (self._refine(P, main["c"], thr, lumen)
-                 if main["how"] != "bridge" else None)
+                 if main["how"] not in ("bridge", "peak") else None)
             C = g["c"] if g is not None else main["c"]
             rn = g["r"] if g is not None else main["r"]
             hu = g["hu"] if g is not None else main["hu"]
@@ -761,7 +967,8 @@ class _Tracer:
                                          prm.radius_jump * max(r, 0.8)), 2)
                 self.log.append(rec)
                 break
-            if rn < prm.min_radius_mm:
+            if rn < (prm.peak_min_radius_mm if main["how"] == "peak"
+                     else prm.min_radius_mm):
                 stop = "thin"
                 rec["event"] = "too thin"
                 rec["limit"] = prm.min_radius_mm
@@ -770,7 +977,8 @@ class _Tracer:
             dn = _unit(C - P)
             lim = (prm.start_ray_deg if (depth == 0 and length < 1e-6
                                          and not self.guided)
-                   else prm.hairpin_deg + 5.0 if main["how"] == "ray"
+                   else prm.hairpin_deg + 5.0
+                   if main["how"] in ("ray", "peak")
                    else prm.uturn_deg)
             if _angle(dn, d) > lim:
                 stop = "turn"
@@ -806,7 +1014,12 @@ class _Tracer:
             hist.append(P.copy())
             d = self._course(hist)
             r = 0.7 * r + 0.3 * rn
-            lumen = 0.85 * lumen + 0.15 * max(hu, thr)
+            # a PEAK pick leaves the reference as it is: brought down to the
+            # faint peak, the threshold would reach the myocardium beside it
+            # (merged regions → drifting centres / false forks); the peak
+            # search simply runs again at the next step
+            if main["how"] != "peak":
+                lumen = 0.85 * lumen + 0.15 * max(hu, thr)
             if self.on_step is not None and self.on_step(
                     line_id, depth, np.asarray(path), d) is False:
                 stop = "cancel"
