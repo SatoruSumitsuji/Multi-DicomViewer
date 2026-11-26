@@ -52,7 +52,7 @@ class V(CPRMixin):
 
 
 v = V()
-n = v._cpr_retire_stale_copies(fp.replace("01", "./01"), keep=v.cur)
+n = v._cpr_retire_stale_copies(os.path.join(d, ".", "01.cpr.json"), keep=v.cur)
 check("resume / save: the older copy of the same file is hidden",
       n == 1 and v.old.get("hidden") and v.old.get("_cpr_stale")
       and "_cpr_saved" not in v.old and not v._cpr_is_cpr_line(v.old))

@@ -21791,7 +21791,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         gap = filled if (filled and self._cpr_at_gap()) else []
         epi = self._cpr_epi_section_2d()          # CPR row → Epi (short axis)
         mapl = self._cpr_map_plane_section_2d()    # right-pane plane line
-        slab = self._cpr_map_slab_section_2d()     # its slab faces (点線)
+        slab = self._cpr_map_slab_section_2d()     # its slab faces (点線 25 %)
         forks = self._cpr_fork_label_pts("A")      # fork candidates (rings)
         srch = self._cpr_search_ring_2d()          # Auto-Track search range
         if hollow or gap or epi or mapl or forks or srch:
@@ -21824,10 +21824,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())
-        if slab:                                 # the right pane's slab, 50 %
+        if slab:                                 # the right pane's slab, 25 %
             p.meas_off_dash_mapper.SetInputData(_colored_dashed_rgba_pd(
                 [tuple(sg) for sg in slab],
-                [self._CPR_MAP_LINE_RGB + (128,)] * len(slab)))
+                [self._CPR_MAP_LINE_RGB + (self._CPR_SLAB_ALPHA,)]
+                * len(slab)))
         else:
             p.meas_off_dash_mapper.SetInputData(vtkPolyData())
         p.meas_pts_edit_mapper.SetInputData(vtkPolyData())

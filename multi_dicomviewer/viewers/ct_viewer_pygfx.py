@@ -1345,9 +1345,9 @@ class _Overlay(QWidget):
             ax_, ay_ = v._cpr_offset_to_screen(*a)
             bx_, by_ = v._cpr_offset_to_screen(*b)
             p.drawLine(QPointF(ax_, ay_), QPointF(bx_, by_))
-        # … and its SLAB (thickness > 0): both faces dotted, 50 %
+        # … and its SLAB (thickness > 0): both faces dotted, 25 %
         for (a, b) in v._cpr_map_slab_section_2d():
-            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, 128), 1.2)
+            pen = QPen(QColor(*v._CPR_MAP_LINE_RGB, v._CPR_SLAB_ALPHA), 1.2)
             pen.setStyle(Qt.PenStyle.DotLine)
             p.setPen(pen)
             ax_, ay_ = v._cpr_offset_to_screen(*a)

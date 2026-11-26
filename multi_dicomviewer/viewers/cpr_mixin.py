@@ -1514,6 +1514,9 @@ class CPRMixin:
 
     #: colour of the right-pane (long-axis) plane line on the short axis
     _CPR_MAP_LINE_RGB = (0, 200, 255)
+    #: alpha of its slab-face 点線 (25 % — 50 % stood out too much, user
+    #: 2026-11-26)
+    _CPR_SLAB_ALPHA = 64
 
     def _cpr_map_plane_section_2d(self) -> list:
         """The right (long-axis / map) pane's cutting plane as a line on the

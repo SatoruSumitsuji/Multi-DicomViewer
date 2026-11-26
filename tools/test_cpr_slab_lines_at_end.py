@@ -2,7 +2,7 @@
 """(user 2026-11-26)
 1. The short axis shows the right pane's SLAB: with a thickness > 0 its two
    faces are drawn as lines parallel to the plane line (± half the
-   thickness), dotted, 50 % — none when the thickness is 0.
+   thickness), dotted, 25 % — none when the thickness is 0.
 2. 「Auto-Track 終了」 (left-pane right-click, under 「Auto-Track 開始」): while
    「中心を指定して続ける」 waits, it ends Auto-Track — the temporary
    stop-section point is removed (one undo step), the search range and the
@@ -106,6 +106,11 @@ check("slab 5 mm: two lines at x = ∓2.5, parallel to the plane line",
       len(sl) == 2 and xs == [-2.5, -2.5, 2.5, 2.5]
       and all(abs(sg[0][1] - pl[0][0][1]) < 1e-9
               and abs(sg[1][1] - pl[0][1][1]) < 1e-9 for sg in sl), sl)
+check("slab lines 25 % (half the former 50 %)",
+      CPRMixin._CPR_SLAB_ALPHA == 64)
+for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
+    s_ = (ROOT / "multi_dicomviewer/viewers" / f).read_text("utf-8")
+    check(f"{f}: slab lines use _CPR_SLAB_ALPHA", "_CPR_SLAB_ALPHA" in s_)
 h._vr_on["B"] = True
 check("VR on the right: no slab lines", h._cpr_map_slab_section_2d() == [])
 h._vr_on["B"] = False
