@@ -5313,10 +5313,12 @@ class MainWindow(QMainWindow):
         try:
             for root, _dirs, names in os.walk(folder):
                 # 「元ファイルごと削除」 moved those there — not loaded again
-                _dirs[:] = [d_ for d_ in _dirs if d_ != "_deleted"]
+                _dirs[:] = [d_ for d_ in _dirs if d_.lower() != "_deleted"]
                 for nm in names:
                     if nm.lower().endswith(".cpr.json"):
                         out.append(os.path.join(root, nm))
+            from multi_dicomviewer.ui.coronary_tree_window import in_deleted_dir
+            out = [p for p in out if not in_deleted_dir(p)]
         except OSError:
             pass
         return sorted(out)
@@ -5362,6 +5364,11 @@ class MainWindow(QMainWindow):
         (src_dir) → else the user is ASKED to point at it."""
         import os
         import json
+        # Files in a _deleted folder (「元ファイルごと削除」) are never opened.
+        from multi_dicomviewer.ui.coronary_tree_window import in_deleted_dir
+        paths = [p for p in (paths or []) if not in_deleted_dir(p)]
+        if not paths:
+            return
         # Multiple .cpr.json → reference overlays via the Coronary Tree panel.
         cprs = [p for p in paths if self._is_cpr_json(p)]
         if len(cprs) >= 2:

@@ -50,6 +50,25 @@ from multi_dicomviewer.core.lv_function import LVFunction
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.ui.snap_dock import SnapDock
 
+#: 「元ファイルごと削除」 moves CPR files into this sub-folder beside them (kept
+#: so a mistake can be undone by hand). The app never reads anything in it.
+DELETED_DIR_NAME = "_deleted"
+
+
+def in_deleted_dir(p) -> bool:
+    """True when *p* lies inside a DELETED_DIR_NAME folder (at any depth, any
+    case) — such files are never loaded or listed (user 2026-11-26: deleted
+    CPR lines came back)."""
+    try:
+        parts = os.path.abspath(str(p)).replace("\\", "/").split("/")
+    except (TypeError, ValueError):
+        return False
+    return any(x.lower() == DELETED_DIR_NAME for x in parts[:-1])
+
+
+def is_deleted_dir_name(name) -> bool:
+    return str(name).lower() == DELETED_DIR_NAME
+
 #: One colour per root trunk; branches inherit their root's colour. Soft/pale
 #: tones so the lines read on a grey CT: LAD pale blue, LCX pale yellow, RCA pale
 #: green, LM red (the left main — the most important trunk, so it stands out;
@@ -787,6 +806,7 @@ class CoronaryTreeWindow(SnapDock):
         added, errs, skipped = 0, [], 0
         first_uid = None
         last_uid = None
+        paths = [p for p in (paths or []) if not in_deleted_dir(p)]
         for p in paths:
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -1038,11 +1058,13 @@ class CoronaryTreeWindow(SnapDock):
         other_names: set = set()     # safe-names found but for a DIFFERENT case
         dup = 0
         for root, _dirs, fnames in os.walk(folder):
-            _dirs[:] = [d_ for d_ in _dirs if d_ != self.DELETED_DIR]
+            _dirs[:] = [d_ for d_ in _dirs if not is_deleted_dir_name(d_)]
             for fn in fnames:
                 if not fn.lower().endswith(".cpr.json"):
                     continue
                 p = os.path.join(root, fn)
+                if in_deleted_dir(p):            # the chosen folder is _deleted
+                    continue
                 try:
                     with open(p, encoding="utf-8") as f:
                         cd = json.load(f)
@@ -1365,12 +1387,13 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             if os.path.isdir(f):
                 for root, _dirs, names in os.walk(f):
-                    _dirs[:] = [d_ for d_ in _dirs if d_ != "_deleted"]
+                    _dirs[:] = [d_ for d_ in _dirs if not is_deleted_dir_name(d_)]
                     for nm in names:
                         if nm.lower().endswith(".cpr.json"):
                             out.append(os.path.join(root, nm))
             elif f.lower().endswith(".cpr.json"):
                 out.append(f)
+        out = [p for p in out if not in_deleted_dir(p)]
         # De-dup on a normalised key (a folder + a file inside it can overlap,
         # and QUrl vs os.walk spell separators differently) but keep one path.
         seen = {}
@@ -3297,7 +3320,7 @@ class CoronaryTreeWindow(SnapDock):
     #: sub-folder (next to the CPR files) that 「元ファイルごと削除」 moves
     #: them to — kept, so a mistake can be undone by hand; folder scans
     #: (フォルダ更新 / 読込 / a dropped folder) skip it
-    DELETED_DIR = "_deleted"
+    DELETED_DIR = DELETED_DIR_NAME
 
     def _ask_delete_mode(self, text: str):
         """Delete prompt (user 2026-11-26): 「元ファイルごと削除」 → "file",
@@ -4763,7 +4786,8 @@ class CoronaryTreeWindow(SnapDock):
         sub = []                                 # one level of sub-folders
         for d in dirs:
             try:
-                sub += [e.path for e in os.scandir(d) if e.is_dir()]
+                sub += [e.path for e in os.scandir(d) if e.is_dir()
+                        and not is_deleted_dir_name(e.name)]
             except OSError:
                 pass
         for vid, v in self._tree.vessels.items():
@@ -4771,7 +4795,9 @@ class CoronaryTreeWindow(SnapDock):
             if not name:
                 continue
             safe = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
-            cand = rec.get(vid, "") if os.path.isfile(rec.get(vid, "")) else ""
+            cand = rec.get(vid, "") if (os.path.isfile(rec.get(vid, ""))
+                                        and not in_deleted_dir(rec.get(vid, ""))) \
+                else ""
             for d in ([] if cand else dirs + sub):
                 p = os.path.join(d, safe + ".cpr.json")
                 if os.path.isfile(p):
@@ -4841,6 +4867,22 @@ class CoronaryTreeWindow(SnapDock):
                 fp = cf if os.path.isabs(cf) else os.path.normpath(
                     os.path.join(base, cf))
                 self._load_cpr_files[d.get("vid")] = fp
+        # A line whose file was 「元ファイルごと削除」d after this tree was saved
+        # (the file is gone, a copy sits in _deleted beside it — or the tree
+        # points into _deleted) was deleted: it is not brought back, nor the
+        # branches below it.
+        gone = set()
+        for vid_, fp in self._load_cpr_files.items():
+            if vid_ not in self._tree.vessels:
+                continue
+            if in_deleted_dir(fp) or (not os.path.exists(fp) and os.path.isfile(
+                    os.path.join(os.path.dirname(fp), DELETED_DIR_NAME,
+                                 os.path.basename(fp)))):
+                gone.add(vid_)
+                gone.update(self._tree.descendants(vid_))
+        for vid_ in gone:
+            self._tree.vessels.pop(vid_, None)
+            self._load_cpr_files.pop(vid_, None)
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         self._last_path = path

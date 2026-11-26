@@ -135,8 +135,8 @@ check("a dropped folder: _deleted is skipped",
       and any(f.endswith("04.cpr.json") for f in files), files)
 src = Path(ctw.__file__).read_text(encoding="utf-8")
 check("フォルダ更新 / 読込 and a dropped folder skip _deleted",
-      src.count('!= self.DELETED_DIR]') == 1
-      and src.count('!= "_deleted"]') == 1)
+      src.count("if not is_deleted_dir_name(d_)]") == 2
+      and src.count("in_deleted_dir(") >= 4)
 check("the single-line delete asks the same way",
       src.count("self._ask_delete_mode(") == 2)
 check("no 「元のCPRファイルは残ります」 prompt left",
