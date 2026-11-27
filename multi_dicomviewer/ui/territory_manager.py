@@ -54,9 +54,13 @@ class TerritoryManagerDialog(QDialog):
         f = self._tbl.font()
         f.setPointSizeF(max(f.pointSizeF(), 11.0))
         self._tbl.setFont(f)
+        # every column width can be dragged (user 2026-11-27); sized to the
+        # contents once, then left to the user
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(_C_NAME, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
+        hh.setMinimumSectionSize(36)
+        self._sized = False
         self._tbl.itemChanged.connect(self._item_changed)
         lay.addWidget(self._tbl, 1)
         tip = QLabel(t("名称をダブルクリックで入力すると、右ペイン右下の「Target-N」"
@@ -154,7 +158,14 @@ class TerritoryManagerDialog(QDialog):
                     pass
         finally:
             self._filling = False
-        shown = bool(getattr(o, "_targets_shown", True))
+        if targets and not self._sized:          # first fill: fit, then free
+            self._tbl.resizeColumnsToContents()
+            if self._tbl.columnWidth(_C_NAME) < 160:
+                self._tbl.setColumnWidth(_C_NAME, 160)
+            self._sized = True
+        # the button follows the per-target flags (what is drawn)
+        shown = bool(getattr(o, "_targets_shown", True)) and any(
+            not tg.get("hidden", False) for tg in targets)
         self._all_btn.setText(t("全ターゲットを非表示") if shown
                               else t("全ターゲットを表示"))
         self._all_btn.setEnabled(bool(targets))

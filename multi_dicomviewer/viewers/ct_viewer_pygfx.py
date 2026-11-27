@@ -9912,7 +9912,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # the RV / blood cavities (A). Recrop only when the region actually
         # changes — a colour re-show of the same region must not rebuild the VR.
         if self._terr_mask_vol is not None:
-            region = np.rint(self._terr_mask_vol) > 0
+            region = np.asarray(mask) > 0        # no rint pass on the float copy
             sig = (int(region.sum()), tuple(region.shape))
             if sig != getattr(self, "_vr_lv_region_sig", None):
                 self._vr_lv_region = region

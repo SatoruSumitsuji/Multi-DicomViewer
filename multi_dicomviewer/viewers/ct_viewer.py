@@ -649,6 +649,19 @@ def numpy_to_vtk_image(vol: np.ndarray, sx, sy, sz) -> vtkImageData:
     return img
 
 
+def _label_u8(lab) -> np.ndarray:
+    """An int-label [z,y,x] map as a C-contiguous uint8 array. A uint8 map
+    (what the Coronary Tree pushes) is returned AS IS — the full-volume
+    rint / clip / astype passes took ~1 s each on a 512² CT (user
+    2026-11-27: 領域色 / target show-hide slow)."""
+    a = np.asarray(lab)
+    if a.dtype == np.uint8:
+        return np.ascontiguousarray(a)
+    if a.dtype == np.bool_:
+        return np.ascontiguousarray(a, np.uint8)
+    return np.ascontiguousarray(np.clip(np.rint(a), 0, 255).astype(np.uint8))
+
+
 def _placeholder_image() -> vtkImageData:
     """Tiny stub kept on each reslice until a real CT loads, so empty
     start-up renders don't log 'input port 0 has 0 connections'."""
@@ -12636,15 +12649,18 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if mask is not None and getattr(self, "_vol", None) is not None:
             m = np.asarray(mask)
             if m.shape == tuple(self._vol.shape):
-                new_np = np.ascontiguousarray(m)
-        # Skip the (4× marching-cubes) VR rebuild when the map is UNCHANGED — the
-        # overlay refresh re-pushes it on every selection, so guard by a cheap sig.
+                new_np = _label_u8(m)            # uint8: no copy when already
+        # Skip the VR / wash rebuild when the map is UNCHANGED — the overlay
+        # refresh re-pushes it on every selection, so guard by a cheap sig: the
+        # per-label voxel counts (the target labels are 5..10, the old '== 4'
+        # count never saw a target change).
         sig = None if new_np is None else (
-            new_np.shape, int(new_np.sum()), int((new_np == 4).sum()),
-            tuple(tuple(c) for c in colors) if colors else None)
-        if sig is not None and sig == getattr(self, "_terr_sig", None) \
-                and self._terr_label_np is not None:
-            return
+            new_np.shape, tuple(tuple(c) for c in colors) if colors else None)
+        prev = getattr(self, "_terr_label_np", None)
+        if (sig is not None and sig == getattr(self, "_terr_sig", None)
+                and prev is not None and prev.shape == new_np.shape
+                and (prev is new_np or np.array_equal(prev, new_np))):
+            return                               # exact same map: nothing to do
         self._terr_sig = sig
         self._terr_label_np = new_np
         self._terr_colors_v = colors
@@ -12652,9 +12668,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # a label LUT (see _refresh's territory reslice).
         self._terr_mask_vol = None
         if new_np is not None:
-            sx, sy, sz = self._dims
-            self._terr_mask_vol = numpy_to_vtk_image(
-                np.ascontiguousarray(new_np, np.float32), sx, sy, sz)
+            # ONE uint8 label image for the MPR wash AND the VR label mask
+            # (was a float32 copy here + another uint8 copy for the VR)
+            self._terr_mask_vol = self._label_to_vtk(new_np)
         on = self._terr_mask_vol is not None
         lut = (_terr_label_lut(colors) if (on and colors)
                else _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
@@ -13104,8 +13120,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if not prev:
             self._vr_crop_cache[key] = self._vr_mask_arr.get(key)
         self._vr_terr_mode[key] = True
-        self._vr_mask_arr[key] = np.ascontiguousarray(
-            np.clip(np.rint(np.asarray(lab)), 0, 255).astype(np.uint8))
+        self._vr_mask_arr[key] = _label_u8(lab)     # the same array: no pass
         self._vr_set_property(key)
         self._vr_apply_xform(key)                 # feeds the label-map mask + matrix
         p.render()
@@ -13695,13 +13710,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         registers voxel-for-voxel with the volume."""
         sx, sy, sz = self._dims
         z, y, x = lab.shape
-        flat = np.ascontiguousarray(
-            np.clip(np.rint(np.asarray(lab)), 0, 255).astype(np.uint8).ravel(order="C"))
+        u8 = _label_u8(lab)
+        last = getattr(self, "_label_vtk_last", None)
+        if last is not None and last[0] is u8:
+            return last[1]                      # the wash's image, reused
+        flat = u8.ravel(order="C")
         arr = numpy_to_vtk(flat, deep=True, array_type=VTK_UNSIGNED_CHAR)
         img = vtkImageData()
         img.SetDimensions(x, y, z)
         img.SetSpacing(float(sx), float(sy), float(sz))
         img.GetPointData().SetScalars(arr)
+        self._label_vtk_last = (u8, img)
         return img
 
     def _vr_set_property(self, key) -> None:

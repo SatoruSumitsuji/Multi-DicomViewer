@@ -51,9 +51,13 @@ def pump():
         app.processEvents()
 
 
+ENG_CALLS = []
+
+
 class _Eng:
     def territory(self, vid, idx):
-        return None, 10.0 + idx
+        ENG_CALLS.append((vid, idx))
+        return np.zeros(4, bool), 10.0 + idx
 
 
 class _LVF:
@@ -118,11 +122,92 @@ pump()
 check("checkbox hides target 2", w._targets[1].get("hidden") is True)
 check("… and its line leaves the VR result",
       len(w._target_summary_text().splitlines()) == 1)
+
+def boxes():
+    return [tb.item(r, 0).checkState() == Qt.CheckState.Checked
+            for r in range(tb.rowCount())]
+
+
 dlg._toggle_all()
-check("全ターゲットを非表示", w._targets_shown is False
-      and w._target_summary_text() == "")
+pump()
+check("全ターゲットを非表示: nothing drawn", w._target_summary_text() == "")
+check("… every checkbox unchecked (matches the display)",
+      boxes() == [False, False], boxes())
+check("… the button now offers 全ターゲットを表示",
+      dlg._all_btn.text() == t("全ターゲットを表示"))
 dlg._toggle_all()
-check("全ターゲットを表示", w._targets_shown is True)
+pump()
+check("全ターゲットを表示: both drawn, both checked",
+      len(w._target_summary_text().splitlines()) == 2
+      and boxes() == [True, True], boxes())
+# the tab's own 表示/非表示 button does the same (one set of flags)
+w._toggle_targets_shown()
+pump()
+check("tab 非表示 → the window's checkboxes follow", boxes() == [False, False])
+w._toggle_targets_shown()
+pump()
+tb.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+pump()
+check("one unchecked → only that one hidden",
+      [tg["hidden"] for tg in w._targets] == [True, False])
+tb.item(0, 0).setCheckState(Qt.CheckState.Checked)
+pump()
+
+# show / hide = DRAW only: no recompute, no full overlay (tube) rebuild
+pushes = {"overlay": 0, "targets": 0, "terr": 0}
+_orig = (w._push_overlay, w._push_targets_only, w._push_territory)
+w._push_overlay = lambda: pushes.__setitem__("overlay", pushes["overlay"] + 1)
+w._push_targets_only = lambda: pushes.__setitem__("targets", pushes["targets"] + 1)
+w._push_territory = lambda: (pushes.__setitem__("terr", pushes["terr"] + 1),
+                             _orig[2]())
+n0 = len(ENG_CALLS)
+w._targets_shown_before = True
+for _ in range(3):
+    w.toggle_target_n(1)
+    w._toggle_targets_shown()
+    w.set_target_name(2, "x%d" % _)
+pump()
+check("show / hide / rename: no full overlay rebuild",
+      pushes["overlay"] == 0 and pushes["targets"] > 0 and pushes["terr"] > 0,
+      pushes)
+check("… and no territory recompute (cached masks)",
+      len(ENG_CALLS) == n0, ENG_CALLS[n0:])
+w._push_overlay, w._push_targets_only, w._push_territory = _orig
+w.set_target_name(2, "")
+for tg in w._targets:
+    tg["hidden"] = False
+w._refresh_targets_table()
+
+# a SELECTED row in the CoronaryTree tab no longer limits the tint: the
+# show checkboxes alone decide
+eng = w._territory
+eng.centers = np.array([[1.0, 1, 1], [3.0, 3, 3], [5.0, 5, 5], [7.0, 7, 7]])
+eng.assignment = {"code": np.array([0, 0, 0, 0]), "code_to_vid": ["lad"]}
+i1, i2 = w._targets[0]["idx"], w._targets[1]["idx"]
+eng.territory = lambda vid, idx: (np.array([idx == i1, idx == i2, False, False]),
+                                  10.0)
+w._terr_mask_cache = None
+w._terr_base_cache = None
+w._full_lv_data = {"epi": {"spacing": [1.0, 1.0, 1.0],
+                           "region": {"vol_shape": [10, 10, 10]}}}
+w._territory_on = True
+w._targets_w.setCurrentItem(w._targets_w.topLevelItem(0))
+lab, _cols = w._territory_systems_full()
+labs = set(np.unique(lab).tolist()) if lab is not None else set()
+check("row 1 selected in the tab: BOTH checked targets are tinted",
+      {5, 6} <= labs, labs)
+w.toggle_target_n(2)
+lab, _cols = w._territory_systems_full()
+check("… an unchecked one is not", 6 not in set(np.unique(lab).tolist()))
+w.toggle_target_n(2)
+w._targets_w.setCurrentItem(None)
+
+# every column width can be dragged
+from PyQt6.QtWidgets import QHeaderView  # noqa: E402
+hh = tb.horizontalHeader()
+check("columns are user-resizable",
+      all(hh.sectionResizeMode(c) == QHeaderView.ResizeMode.Interactive
+          for c in range(7)))
 
 # the name survives a recompute and goes into the .territory.json
 w._recompute_targets()
@@ -212,6 +297,22 @@ cy = (H - (bb[2] + bb[3]) / 2) / dpr
 check("VR: a right-click ON the target result is a hit",
       v._vr_tgt_text_hit("B", cx, cy), (bb, cx, cy))
 check("… elsewhere is not", not v._vr_tgt_text_hit("B", 10, 10))
+
+# viewer: a uint8 map is used as is; the same map again does nothing; a
+# TARGET-only change (labels 5..10) is applied (the old sig missed it)
+lab = np.zeros(v._vol.shape, np.uint8)
+lab[5:10, 10:20, 10:20] = 1
+cols = [(1, 0, 0, .4)] * 10
+v.set_territory_mask(lab, cols)
+check("viewer: a uint8 label map is not copied", v._terr_label_np is lab)
+img1 = v._terr_mask_vol
+v.set_territory_mask(lab.copy(), cols)
+check("… the same map again: nothing rebuilt", v._terr_mask_vol is img1)
+lab2 = lab.copy()
+lab2[6:8, 12:14, 12:14] = 5                       # a target on top
+v.set_territory_mask(lab2, cols)
+check("… a target change is applied", v._terr_label_np is lab2
+      and v._terr_mask_vol is not img1)
 
 src = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text("utf-8")
 check("pygfx: the result rect is kept and its right-click opens the window",

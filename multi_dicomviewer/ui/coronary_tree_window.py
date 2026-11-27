@@ -2429,6 +2429,10 @@ class CoronaryTreeWindow(SnapDock):
                           "name": str(tg.get("name", "") or "")}
                          for tg in territory_file_mod.targets(data)
                          if tg.get("vid")]
+        if not getattr(self, "_targets_shown", True):
+            for tg in self._targets:             # one show flag per target
+                tg["hidden"] = True
+            self._targets_shown = True
         self._populate()
         self._compute_territory(calc=True)   # engine + targets + overlay
         self._bundle()["terr_base"] = self._terr_sig()
@@ -2607,6 +2611,7 @@ class CoronaryTreeWindow(SnapDock):
                 it.setToolTip(1, nm)
             self._targets_w.addTopLevelItem(it)
         self._targets_w.blockSignals(False)
+        self._sync_targets_vis_btn()
         self._target_mgr_refresh()
 
     def _on_target_item_changed(self, it, col):
@@ -2624,8 +2629,7 @@ class CoronaryTreeWindow(SnapDock):
         # own itemChanged (use-after-free crash risk, as with 除外).
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, self._refresh_targets_table)
-        self._push_overlay()
-        self._push_territory()
+        self._push_target_view()
 
     def add_target(self, vid: str, idx: int) -> None:
         """Public (shell): set a Target at (vid, idx) — a click on the CT vessel.
@@ -2678,20 +2682,55 @@ class CoronaryTreeWindow(SnapDock):
             dlg.deleteLater()
 
     def _toggle_targets_shown(self):
-        self._targets_shown = not self._targets_shown
-        if getattr(self, "_targets_vis_btn", None) is not None:
-            self._targets_vis_btn.setText(
-                t("非表示") if self._targets_shown else t("表示"))
-        self._push_overlay()
+        """全ターゲット 表示 / 非表示: sets EVERY target's own show flag (so the
+        per-target checkboxes here and in Territory Manage always match what
+        is drawn — user 2026-11-27) — any shown → all hidden, else all shown."""
+        any_shown = self._targets_shown and any(
+            not tg.get("hidden", False) for tg in self._targets)
+        for tg in self._targets:
+            tg["hidden"] = any_shown
+        self._targets_shown = True
+        self._sync_targets_vis_btn()
+        self._refresh_targets_table()
+        self._push_target_view()
+
+    def _sync_targets_vis_btn(self) -> None:
+        b = getattr(self, "_targets_vis_btn", None)
+        if b is not None:
+            any_shown = self._targets_shown and any(
+                not tg.get("hidden", False) for tg in self._targets)
+            b.setText(t("非表示") if any_shown else t("表示"))
+
+    def _push_target_view(self) -> None:
+        """A target show / hide / name / delete: DRAW only — the markers and the
+        colour map from the cached masks (user 2026-11-27: every click rebuilt
+        all the coronary tubes and composed the territory twice). Nothing is
+        recomputed."""
+        self._push_targets_only()
         self._push_territory()
-        self._target_mgr_refresh()
 
     def _delete_last_target(self):
         if self._targets:
             self._targets.pop()
             self._refresh_targets_table()
-            self._push_overlay()
-            self._push_territory()
+            self._push_target_view()
+
+    def _eng_territory(self, vid, idx):
+        """eng.territory(vid, idx) cached per engine — a target's mask is
+        computed ONCE, then only drawn (show / hide / name / colour)."""
+        eng = self._territory
+        if eng is None:
+            return None, 0.0
+        c = getattr(self, "_terr_mask_cache", None)
+        if c is None or c.get("eng") is not eng:
+            c = self._terr_mask_cache = {"eng": eng, "m": {}}
+        k = (vid, int(idx))
+        hit = c["m"].get(k)
+        if hit is None:
+            hit = c["m"][k] = eng.territory(vid, int(idx))
+            if len(c["m"]) > 64:                 # bounded (drags add many)
+                c["m"].pop(next(iter(c["m"])))
+        return hit
 
     def _territory_full_mask(self):
         """Full-volume 0/1 [z,y,x] mask of the SELECTED target's distal territory
@@ -2710,18 +2749,12 @@ class CoronaryTreeWindow(SnapDock):
             return None
         sx, sy, sz = (float(s) for s in sp)
         vs = [int(s) for s in vs]
-        sel = None
-        it = self._targets_w.currentItem()
-        if it is not None:
-            sel = it.data(0, _UID_ROLE)
-        if isinstance(sel, int) and 0 <= sel < len(self._targets) \
-                and not self._targets[sel].get("hidden"):
-            tgs = [self._targets[sel]]
-        else:
-            tgs = [tg for tg in self._targets if not tg.get("hidden")]
+        # the show checkboxes alone decide (user 2026-11-27: a selected row
+        # no longer tints only its own target — that read as a mismatch)
+        tgs = [tg for tg in self._targets if not tg.get("hidden")]
         full = np.zeros(vs, bool)
         for tg in tgs:
-            mask_v, _ml = eng.territory(tg["vid"], tg["idx"])
+            mask_v, _ml = self._eng_territory(tg["vid"], tg["idx"])
             c = eng.centers[mask_v]
             if len(c) == 0:
                 continue
@@ -2752,35 +2785,42 @@ class CoronaryTreeWindow(SnapDock):
         c = eng.centers
         if len(c) == 0:
             return None, None
-        fx = np.clip(np.round(c[:, 0] / sx).astype(int), 0, vs[2] - 1)
-        fy = np.clip(np.round(c[:, 1] / sy).astype(int), 0, vs[1] - 1)
-        fz = np.clip(np.round(c[:, 2] / sz).astype(int), 0, vs[0] - 1)
-        code = np.asarray(eng.assignment["code"])
         code_to_vid = eng.assignment["code_to_vid"]
-        # per-vessel-code → LAD/LCX/RCA label (1/2/3); 0 = LM stub / unassigned.
-        clabel = np.zeros(len(code_to_vid), np.uint8)
-        for ci, vid in enumerate(code_to_vid):
-            clabel[ci] = _ROLE_TERR_LABEL.get(self._root_role(vid), 0)
-        safe = np.clip(code, 0, max(0, len(code_to_vid) - 1))
-        labels_v = np.where(code >= 0, clabel[safe], 0).astype(np.uint8)
-        full = np.zeros(vs, np.uint8)
-        full[fz, fy, fx] = labels_v
+        roles = tuple(self._root_role(vid) for vid in code_to_vid)
+        # The LAD/LCX/RCA base map only depends on the engine + the roles:
+        # built ONCE, then copied (user 2026-11-27: the colour map was rebuilt
+        # from scratch on every target show / hide).
+        bc = getattr(self, "_terr_base_cache", None)
+        if not (bc is not None and bc["eng"] is eng and bc["roles"] == roles
+                and bc["vs"] == tuple(vs) and bc["sp"] == (sx, sy, sz)):
+            fx = np.clip(np.round(c[:, 0] / sx).astype(int), 0, vs[2] - 1)
+            fy = np.clip(np.round(c[:, 1] / sy).astype(int), 0, vs[1] - 1)
+            fz = np.clip(np.round(c[:, 2] / sz).astype(int), 0, vs[0] - 1)
+            code = np.asarray(eng.assignment["code"])
+            # per-vessel-code → LAD/LCX/RCA label (1/2/3); 0 = LM stub / none.
+            clabel = np.zeros(len(code_to_vid), np.uint8)
+            for ci, role in enumerate(roles):
+                clabel[ci] = _ROLE_TERR_LABEL.get(role, 0)
+            safe = np.clip(code, 0, max(0, len(code_to_vid) - 1))
+            labels_v = np.where(code >= 0, clabel[safe], 0).astype(np.uint8)
+            base = np.zeros(vs, np.uint8)
+            base[fz, fy, fx] = labels_v
+            bc = self._terr_base_cache = {
+                "eng": eng, "roles": roles, "vs": tuple(vs),
+                "sp": (sx, sy, sz), "fx": fx, "fy": fy, "fz": fz,
+                "base": base}
+        fx, fy, fz = bc["fx"], bc["fy"], bc["fz"]
+        full = bc["base"].copy()
         # Target territories → labels 4..9 by target NUMBER (Target1..6), each its
         # own colour, ON TOP of the base (honours per-target hidden + selection).
         if self._targets_shown and self._targets:
-            sel = None
-            it = self._targets_w.currentItem()
-            if it is not None:
-                sel = it.data(0, _UID_ROLE)
-            if isinstance(sel, int) and 0 <= sel < len(self._targets) \
-                    and not self._targets[sel].get("hidden"):
-                picks = [sel]
-            else:
-                picks = [i for i in range(len(self._targets))
-                         if not self._targets[i].get("hidden")]
+            # the show checkboxes alone decide which targets are tinted (a
+            # selected row no longer limits it — user 2026-11-27)
+            picks = [i for i in range(len(self._targets))
+                     if not self._targets[i].get("hidden")]
             for i in picks:
                 tg = self._targets[i]
-                mv, _ml = eng.territory(tg["vid"], tg["idx"])
+                mv, _ml = self._eng_territory(tg["vid"], tg["idx"])
                 if mv.any():
                     full[fz[mv], fy[mv], fx[mv]] = 5 + (i % 6)   # Target(i+1): 5..10
         # Colours: LAD/LCX/RCA/LM systems (configurable hue, user opacity) then the
@@ -2811,7 +2851,7 @@ class CoronaryTreeWindow(SnapDock):
         by_role: dict = {}
         for vid in self._tree.roots():
             v = self._tree.vessels[vid]
-            _m, ml = eng.territory(vid, self._tree.proximal_idx(vid))
+            _m, ml = self._eng_territory(vid, self._tree.proximal_idx(vid))
             by_role[v.role] = by_role.get(v.role, 0.0) + ml
         lines = [f"Myocardium {self._myo_ml:.1f}mL"]
         for role in ("LM", "LAD", "LCX", "RCA"):
@@ -2925,14 +2965,12 @@ class CoronaryTreeWindow(SnapDock):
             self._shell.coronary_target_mode(self._target_mode)
 
     def _on_target_selection(self):
-        self._push_overlay()          # re-highlight the selected Target marker
-        self._push_territory()        # re-tint the selected Target's territory
+        self._push_target_view()      # re-highlight / re-tint (draw only)
 
     def _clear_targets(self):
         self._targets = []
         self._refresh_targets_table()
-        self._push_overlay()
-        self._push_territory()
+        self._push_target_view()
 
     def toggle_target_n(self, n: int) -> None:
         """Show/hide the n-th (1-based) target's territory — used by the VR pane's
@@ -2941,8 +2979,7 @@ class CoronaryTreeWindow(SnapDock):
         if 0 <= i < len(self._targets):
             self._targets[i]["hidden"] = not self._targets[i].get("hidden", False)
             self._refresh_targets_table()
-            self._push_overlay()
-            self._push_territory()
+            self._push_target_view()
 
     def delete_target_n(self, n: int) -> None:
         """Delete the n-th (1-based) target — used by the VR pane's right-click on
@@ -2951,8 +2988,7 @@ class CoronaryTreeWindow(SnapDock):
         if 0 <= i < len(self._targets):
             del self._targets[i]
             self._refresh_targets_table()
-            self._push_overlay()
-            self._push_territory()
+            self._push_target_view()
 
     def move_target_n(self, n: int, vid: str, idx: int,
                       phase: str = "end") -> None:
@@ -3044,13 +3080,11 @@ class CoronaryTreeWindow(SnapDock):
         if ch is a_vis:
             self._targets[ti]["hidden"] = not hidden
             self._refresh_targets_table()
-            self._push_overlay()
-            self._push_territory()
+            self._push_target_view()
         elif ch is a_del:
             del self._targets[ti]
             self._refresh_targets_table()
-            self._push_overlay()
-            self._push_territory()
+            self._push_target_view()
         elif ch in col_acts:
             self.set_target_color(col_acts[ch], ti + 1)
         elif ch is a_custom:
@@ -3081,7 +3115,7 @@ class CoronaryTreeWindow(SnapDock):
         settings_mod.save_coronary_params(self._coro_params)   # persist the slot
         self._run_busy(t("灌流域を再描画中…"),
                        lambda: (self._refresh_targets_table(),
-                                self._push_overlay(), self._push_territory()))
+                                self._push_target_view()))
 
     def target_specs(self, uid: str | None = None) -> list:
         """Target markers/territories for the CT overlay: each = the target 3-D
