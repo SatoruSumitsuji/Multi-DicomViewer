@@ -87,6 +87,39 @@ check("… and stays gone on later redraws", n_line() == 0, n_line())
 v._ct_show_lv(True)                      # back to LVモード
 check("LVモード again: the line is back", n_line() >= 2, n_line())
 
+# 壁厚3D / 壁厚短軸 heat map shown in LVモード → gone in Simple View, back after
+v._lvv_thick_ready = lambda: True
+for mode in ("3d", "sax"):
+    v._lvv_thick_mode = mode
+    v._lvv_thick_vol = v._lvv_thick_vol_from_sub(
+        np.full((10, 10, 10), 6.0, np.float32), (5, 15, 5, 15, 5, 15))
+    v._lvv_thick_stats = {"max": 6.0, "mean": 6.0}
+    v._lvv_thick_refresh_display()
+    bar = v.pane["A"].thick_bar
+    check(f"壁厚{mode}: shown in LVモード (colour bar on)", bool(bar.GetVisibility()))
+    v._ct_show_lv(False)
+    check(f"壁厚{mode}: Simple View → the heat map is off",
+          v._lvv_thick_mode is None and not bar.GetVisibility())
+    v._ct_show_lv(True)
+    check(f"壁厚{mode}: LVモード again → back ({mode})",
+          v._lvv_thick_mode == mode and v._lvv_thick_vol is not None
+          and bool(bar.GetVisibility()))
+v._lvv_thick_mode = v._lvv_thick_vol = None
+v._lvv_thick_refresh_display()
+# the short-axis wall map legend (contour LV SAX) is hidden too
+v._lv_wall = True
+v._lv_sax_active = lambda: True
+v._lv["sax_pane"] = "A"
+v._lv_update_wall_legend()
+leg = v.pane["A"].lv_wall_legend
+check("SAX wall legend shown in LVモード", any(a.GetVisibility() for a in leg))
+v._ct_show_lv(False)
+v._lv_update_wall_legend()
+check("… hidden in Simple View", not any(a.GetVisibility() for a in leg))
+v._ct_show_lv(True)
+v._lv_wall = False
+del v._lv_sax_active
+
 src = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text("utf-8")
 i = src.index("def _paint_lv(self, p, key, w, h):")
 check("pygfx: _paint_lv draws nothing while the LV is hidden",

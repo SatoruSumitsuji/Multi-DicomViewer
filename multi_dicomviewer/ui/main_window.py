@@ -3232,6 +3232,8 @@ class MainWindow(QMainWindow):
                 w.toggle_target_n(int(n))
             elif action.startswith("color:") and hasattr(w, "set_target_color"):
                 w.set_target_color(action[len("color:"):], int(n))
+            elif action == "manage" and hasattr(w, "open_target_manager"):
+                w.open_target_manager()          # Territory Manage window
         except Exception:                                # noqa: BLE001
             pass
 

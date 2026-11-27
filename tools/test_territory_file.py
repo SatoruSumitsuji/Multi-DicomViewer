@@ -80,6 +80,7 @@ class Fake:
     save_territory = CoronaryTreeWindow.save_territory
     load_territory = CoronaryTreeWindow.load_territory
     _terr_sig = CoronaryTreeWindow._terr_sig
+    _target_label = CoronaryTreeWindow._target_label
 
     def __init__(self):
         self._tree = tree
@@ -150,7 +151,8 @@ w3._targets = []
 ok = w3.load_territory(saved, coro, full, path=sp, coro_path=coro_p, lv_path=lv_p)
 check("load: tree / FullLv / targets restored and recomputed",
       ok and w3._territory == "computed" and "lad" in w3._tree.vessels
-      and w3._targets == [{"vid": "lad", "idx": 5, "hidden": False}]
+      and w3._targets == [{"vid": "lad", "idx": 5, "hidden": False,
+                         "name": ""}]
       and w3._last_path == coro_p and w3._full_lv_path == lv_p
       and w3._b.get("terr_path") == sp and w3.used == "1.2.3")
 check("load refuses a non-territory file",

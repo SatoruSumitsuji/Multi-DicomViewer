@@ -476,7 +476,8 @@ class CTModeBarMixin:
     def _ct_terr_group_sync(self) -> None:
         """Territory Calc / Load / Save live in row 3 and show in every mode
         (Calc / Save enabled by the data, see refresh_ct_mode_bar)."""
-        for nm in ("_ct_terr_btn", "_ct_terr_load_btn", "_ct_terr_save_btn"):
+        for nm in ("_ct_terr_btn", "_ct_terr_mgr_btn", "_ct_terr_load_btn",
+                   "_ct_terr_save_btn"):
             b = getattr(self, nm, None)
             if b is not None and b.isHidden():
                 b.setVisible(True)
@@ -501,6 +502,13 @@ class CTModeBarMixin:
             sb = FitButton(t("Save"))
             sb.setHelpToolTip(t(_TERR_SAVE_TIP))
             sb.clicked.connect(lambda _c=False: self._ct_territory_save_clicked())
+            # Territory Manage (user 2026-11-27): the target list in its own
+            # window (the CoronaryTree tab's list is small / easy to miss)
+            mb = FitButton(t("Territory Manage"))
+            mb.setHelpToolTip(t("Territory Manage：ターゲットの一覧を別ウインドウで表示します（表示・非表示、名称、心筋%、灌流域mL、元血管名、位置）。右ペイン右下のターゲット結果を右クリックしても開きます"))
+            mb.setStyleSheet(_TERR_BTN_CSS)
+            mb.clicked.connect(lambda _c=False: self._ct_territory_manage())
+            self._ct_terr_mgr_btn = mb
             self._ct_terr_btn = tb
             self._ct_terr_load_btn = lb
             self._ct_terr_save_btn = sb
@@ -534,6 +542,7 @@ class CTModeBarMixin:
                 row.addWidget(sep)
             if kind == "terr":                   # inputs ▶ Calc ▶ result
                 row.addWidget(self._ct_terr_btn)
+                row.addWidget(self._ct_terr_mgr_btn)
                 row.addSpacing(6)
             lb = QLabel("")
             lb.setStyleSheet(sty)
@@ -731,6 +740,9 @@ class CTModeBarMixin:
             has_lv = (self._ct_lv_ready() or bool(full)
                       or bool(state.get("full_mem")))
             tb.setEnabled(has_tree and has_lv)
+            mb = getattr(self, "_ct_terr_mgr_btn", None)
+            if mb is not None:
+                mb.setEnabled(has_tree)          # the window says what is missing
             miss = [x for x, ok in ((t("FullLv（または LV 計測）"), has_lv),
                                     (t("corotree（冠動脈ツリー）"), has_tree))
                     if not ok]
@@ -980,6 +992,13 @@ class CTModeBarMixin:
                 "valves": dict(getattr(self, "_lv_valve_shown", {}) or {}),
                 "apex": g("_lv_apex_shown", True),
                 "lvv_apex": g("_lvv_apex_shown", True),
+                # 壁厚3D / 壁厚短軸 heat map (user 2026-11-27: gone in Simple
+                # View whatever the view — 3-D or short axis; back in LVモード)
+                "thick": (None if getattr(self, "_lvv_thick_mode", None) is None
+                          else {"mode": self._lvv_thick_mode,
+                                "vol": getattr(self, "_lvv_thick_vol", None),
+                                "stats": getattr(self, "_lvv_thick_stats", None),
+                                "thi": getattr(self, "_lvv_thick_thi", 20.0)}),
             }
             self._ct_lv_snap = snap
             self._ct_lv_hidden = True
@@ -1032,6 +1051,16 @@ class CTModeBarMixin:
                 for mm in (getattr(self, "_measures", {}) or {}).get(k, []):
                     if mm.get("_lvv") == "apex":
                         mm["hidden"] = not on
+        th = snap.get("thick")
+        if th:
+            self._lvv_thick_mode = th["mode"] if on else None
+            self._lvv_thick_vol = th["vol"] if on else None
+            self._lvv_thick_stats = th["stats"] if on else None
+            if on:
+                self._lvv_thick_thi = th.get("thi", 20.0)
+            _do("_lv_update_text")
+            _do("_lvv_thick_refresh_display")
+            _do("_lvv_thick_sync_buttons")
         _do("_lv_style_selectors")
         # the LV pane overlay (base-cut line, apex markers, SAX lines …) is
         # rebuilt now: hidden in Simple View / CoronaryTree, back in LVモード
@@ -1049,6 +1078,15 @@ class CTModeBarMixin:
             pass
 
     # ------------------------------------------------- Territory (in place)
+    def _ct_territory_manage(self) -> None:
+        """「Territory Manage」: the shell opens the target window."""
+        shell = self._ct_mode_shell()
+        if shell is not None and hasattr(shell, "coronary_target_action"):
+            try:
+                shell.coronary_target_action(0, "manage")
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _ct_territory_compute_clicked(self) -> None:
         """「Territory Calc」 (row 3, any mode): the shell computes the territory
         from this CT's LV + tree and calls back _ct_territory_enter. In the

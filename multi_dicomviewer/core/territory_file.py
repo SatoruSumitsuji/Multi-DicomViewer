@@ -66,8 +66,9 @@ def build(src_meta: dict | None = None,
         "src": dict(src_meta or {}),
         "corotree": {"path": corotree_path, "sha1": file_sha1(corotree_path)},
         "full_lv": {"path": full_lv_path, "sha1": file_sha1(full_lv_path)},
-        "targets": [{"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
-                     "hidden": bool(tg.get("hidden", False))}
+        "targets": [dict({"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
+                          "hidden": bool(tg.get("hidden", False))},
+                         **({"name": str(tg["name"])} if tg.get("name") else {}))
                     for tg in (targets or []) if tg.get("vid")],
         "params": dict(params or {}),
         "result": dict(result or {}),

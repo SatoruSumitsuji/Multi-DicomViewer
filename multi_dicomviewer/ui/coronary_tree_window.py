@@ -443,7 +443,8 @@ class CoronaryTreeWindow(SnapDock):
         """Territory settings saved in .territory.json besides the two links."""
         return json.dumps(
             {"targets": [{"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
-                          "hidden": bool(tg.get("hidden", False))}
+                          "hidden": bool(tg.get("hidden", False)),
+                          "name": str(tg.get("name", "") or "")}
                          for tg in (self._targets or []) if tg.get("vid")],
              "alpha": round(float(getattr(self, "_terr_alpha", 0.45)), 3),
              "shown": bool(getattr(self, "_targets_shown", True))},
@@ -2354,7 +2355,7 @@ class CoronaryTreeWindow(SnapDock):
                                  else float(self._myo_ml)),
                "systems": [ln for ln in self._territory_summary_text().split(chr(10))
                            if ln],
-               "targets": [f"Target-{i} {tg.get('pct', 0.0):.1f}% / "
+               "targets": [f"{self._target_label(i)} {tg.get('pct', 0.0):.1f}% / "
                            f"{tg.get('ml', 0.0):.1f}mL"
                            for i, tg in enumerate(self._targets, 1)]}
         data, err = territory_file_mod.build(
@@ -2424,7 +2425,8 @@ class CoronaryTreeWindow(SnapDock):
             self._targets_shown = bool(p["targets_shown"])
         self._full_lv_data = full
         self._targets = [{"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
-                          "hidden": bool(tg.get("hidden", False))}
+                          "hidden": bool(tg.get("hidden", False)),
+                          "name": str(tg.get("name", "") or "")}
                          for tg in territory_file_mod.targets(data)
                          if tg.get("vid")]
         self._populate()
@@ -2564,7 +2566,8 @@ class CoronaryTreeWindow(SnapDock):
             _mask, ml = eng.territory(vid, idx)
             pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
             good.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct,
-                         "hidden": tg.get("hidden", False)})
+                         "hidden": tg.get("hidden", False),
+                         "name": tg.get("name", "") or ""})
         self._targets = good
         self._refresh_targets_table()
 
@@ -2599,8 +2602,12 @@ class CoronaryTreeWindow(SnapDock):
             if hidden:
                 for c in range(self._targets_w.columnCount()):
                     it.setForeground(c, QColor("#999999"))
+            nm = str(tg.get("name", "") or "")
+            if nm:
+                it.setToolTip(1, nm)
             self._targets_w.addTopLevelItem(it)
         self._targets_w.blockSignals(False)
+        self._target_mgr_refresh()
 
     def _on_target_item_changed(self, it, col):
         """Column-0 checkbox toggled → set that target's hidden flag and refresh."""
@@ -2677,6 +2684,7 @@ class CoronaryTreeWindow(SnapDock):
                 t("非表示") if self._targets_shown else t("表示"))
         self._push_overlay()
         self._push_territory()
+        self._target_mgr_refresh()
 
     def _delete_last_target(self):
         if self._targets:
@@ -2824,11 +2832,57 @@ class CoronaryTreeWindow(SnapDock):
             if tg.get("hidden"):
                 continue
             if self._territory is None:          # 「—」 until Calc
-                lines.append(f"Target-{i} —")
+                lines.append(f"{self._target_label(i)} —")
                 continue
-            lines.append(f"Target-{i} {tg.get('pct', 0.0):.1f}% / "
+            lines.append(f"{self._target_label(i)} {tg.get('pct', 0.0):.1f}% / "
                          f"{tg.get('ml', 0.0):.1f}mL")
         return "\n".join(lines)
+
+    def _target_label(self, n: int) -> str:
+        """The n-th (1-based) target's display name: its own name (Territory
+        Manage) or 「Target-N」."""
+        i = int(n) - 1
+        if 0 <= i < len(self._targets):
+            nm = str(self._targets[i].get("name", "") or "").strip()
+            if nm:
+                return nm
+        return f"Target-{int(n)}"
+
+    def set_target_name(self, n: int, name: str) -> None:
+        """Territory Manage: name the n-th (1-based) target — shown instead of
+        「Target-N」 in the right pane's bottom-right result (and saved in the
+        .territory.json)."""
+        i = int(n) - 1
+        if not (0 <= i < len(self._targets)):
+            return
+        name = str(name or "").strip()
+        if str(self._targets[i].get("name", "") or "") == name:
+            return
+        self._targets[i]["name"] = name
+        self._refresh_targets_table()
+        self._push_territory()               # the VR target text (no recompute)
+
+    def open_target_manager(self) -> None:
+        """「Territory Manage」 (row 3) / a right-click on the VR target result:
+        the target list in its own window (raised when already open)."""
+        dlg = getattr(self, "_target_mgr", None)
+        if dlg is None:
+            from multi_dicomviewer.ui.territory_manager import \
+                TerritoryManagerDialog
+            dlg = TerritoryManagerDialog(self, self.window())
+            self._target_mgr = dlg
+        dlg.refresh()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _target_mgr_refresh(self) -> None:
+        dlg = getattr(self, "_target_mgr", None)
+        if dlg is not None and dlg.isVisible():
+            try:
+                dlg.refresh()
+            except Exception:                    # noqa: BLE001
+                pass
 
     def _push_territory(self):
         """Compute the perfusion-territory colour map (LAD/LCX/RCA + Target) and
@@ -4430,7 +4484,15 @@ class CoronaryTreeWindow(SnapDock):
             n += 1
         if n:
             self._populate()
-            self.treeChanged.emit()
+            # user 2026-11-27: excluding RCA / LM blanked the Territory and the
+            # right pane's VR (the ribs showed). The result and the VR stay as
+            # they are; the new exclusion counts at the next Territory Calc.
+            if self._territory is not None:
+                self._emit_renamed()
+                self._hint.setText(t("除外を変更しました。Territory への反映は"
+                                     "「Territory Calc」で再計算したときです。"))
+            else:
+                self.treeChanged.emit()
 
     def _set_fin_traced(self, vids, on: bool) -> None:
         """FinTrace ◯/× on the chosen rows; also written into each .cpr.json

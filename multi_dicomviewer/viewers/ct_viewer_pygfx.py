@@ -1204,6 +1204,8 @@ class _Overlay(QWidget):
             else:                                    # BR (bottom-right)
                 x = max(6, w - maxw - 10)
                 y = h - bh - 34                       # clear of the angle readout
+                # remembered for its right-click → Territory Manage
+                v._tgt_text_rect[key] = (x, y, maxw + 6, bh)
             _draw_outlined_text(
                 p, QRectF(x, y, maxw + 6, bh),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
@@ -1264,6 +1266,7 @@ class _Overlay(QWidget):
                 y += lh
 
         _block_terr_tr(getattr(v, "_terr_summary_text", ""), v._rfs(13))
+        v._tgt_text_rect[key] = None
         _block(getattr(v, "_tgt_summary_text", ""), True, v._rfs(15), "BR")
         # WW/WL bottom-left (same as the MPR panes' readout).
         _ww, _wl = v._wl_of(key)
@@ -3139,6 +3142,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # myocardium summary (top-right) + per-target list (bottom-right).
         self._terr_summary_text = ""
         self._tgt_summary_text = ""
+        self._tgt_text_rect = {"A": None, "B": None}   # VR target result (px)
         # vids whose NAME label is painted. Empty by default (labels cluttered
         # the view); turned on per-vessel via the CPR line's right-click menu.
         self._coro_names: set[str] = set()
@@ -3735,6 +3739,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # delete, colour). Checked BEFORE the coronary-line menu so a dot sitting
             # on its vessel still gets the target menu. Deferred out of the pointer
             # handler (Mac modal-in-pointer-handler safety).
+            # the target result (bottom-right) → Territory Manage window
+            _tr = (self._tgt_text_rect or {}).get(key)
+            if (self._vr_on.get(key) and self._coro_target_action_cb is not None
+                    and _tr is not None
+                    and _tr[0] - 6 <= x <= _tr[0] + _tr[2] + 6
+                    and _tr[1] - 6 <= y <= _tr[1] + _tr[3] + 6):
+                self._reset_pointer_state()
+                QTimer.singleShot(
+                    0, lambda: self._coro_target_action_cb(0, "manage"))
+                return
             if self._vr_on.get(key) and self._coro_target_action_cb is not None:
                 tn = self._vr_pick_target_marker(key, x, y)
                 if tn is not None:
@@ -9754,6 +9768,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             menu = QMenu(self)
             a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
             a_del = menu.addAction(t("ターゲットを削除"))
+            a_mgr = menu.addAction(t("Territory Manage…"))
             col_menu = menu.addMenu(t("領域の色変更"))
             choices = [("赤", "#e06666"), ("橙", "#f6b26b"), ("桃", "#e78ac3"),
                        ("紫", "#9b59b6"), ("白", "#f2f2f2")]
@@ -9762,7 +9777,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             ch = menu.exec(gp)
         finally:
             self._reset_pointer_state()      # never leave a stuck grab (Mac)
-        if ch is a_vis:
+        if ch is a_mgr:
+            self._coro_target_action_cb(int(n), "manage")
+        elif ch is a_vis:
             self._coro_target_action_cb(int(n), "toggle")
         elif ch is a_del:
             self._coro_target_action_cb(int(n), "delete")

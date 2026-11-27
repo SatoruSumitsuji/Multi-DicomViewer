@@ -1104,6 +1104,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # show/hide, delete) — same actions as the panel's per-target right-click.
         if (self._owner._vr_on.get(self._which)
                 and e.button() == Qt.MouseButton.RightButton):
+            # the target result (bottom-right) → Territory Manage window
+            if self._owner._vr_tgt_text_hit(
+                    self._which, e.position().x(), e.position().y()):
+                self._owner._open_target_manager()
+                return
             if self._owner._vr_target_menu(
                     self._which, e.position().x(), e.position().y()):
                 return
@@ -13257,6 +13262,32 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return None
         return int(best_n)
 
+    def _vr_tgt_text_hit(self, key, sx, sy) -> bool:
+        """True if (sx, sy) (widget px, y down) is on the VR pane's bottom-right
+        target result (tgtact) — its right-click opens Territory Manage."""
+        p = self.pane[key]
+        ta = getattr(p, "tgtact", None)
+        if (ta is None or not ta.GetVisibility()
+                or not (getattr(self, "_tgt_summary_text", "") or "")):
+            return False
+        try:
+            bb = [0.0, 0.0, 0.0, 0.0]
+            ta.GetBoundingBox(p.ren, bb)         # display px, y up
+            dpr = max(1.0, p.canvas.devicePixelRatioF())
+            _W, H = p.ren.GetRenderWindow().GetSize()
+            vx, vy = sx * dpr, H - sy * dpr
+            m = 6 * dpr
+            return (bb[0] - m <= vx <= bb[1] + m
+                    and bb[2] - m <= vy <= bb[3] + m)
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _open_target_manager(self) -> None:
+        cb = getattr(self, "_coro_target_action_cb", None)
+        if cb is not None:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: cb(0, "manage"))
+
     def _vr_target_menu(self, key, sx, sy) -> bool:
         """Right-click on the VR: on a Target marker → territory show/hide, delete;
         else on a coronary vessel → set a Target there. Returns True if a menu was
@@ -13271,13 +13302,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             menu = QMenu(self)
             a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
             a_del = menu.addAction(t("ターゲットを削除"))
+            a_mgr = menu.addAction(t("Territory Manage…"))
             col_menu = menu.addMenu(t("領域の色変更"))
             choices = [("赤", "#e06666"), ("橙", "#f6b26b"), ("桃", "#e78ac3"),
                        ("紫", "#9b59b6"), ("白", "#f2f2f2")]
             col_acts = {col_menu.addAction(t(nm)): hx for nm, hx in choices}
             a_custom = col_menu.addAction(t("その他…"))
             ch = menu.exec(gp)
-            if ch is a_vis:
+            if ch is a_mgr:
+                self._coro_target_action_cb(n, "manage")
+            elif ch is a_vis:
                 self._coro_target_action_cb(n, "toggle")
             elif ch is a_del:
                 self._coro_target_action_cb(n, "delete")
@@ -19319,7 +19353,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         orange 5-7 / yellow 7-9 / green >9 mm) on the short-axis pane — visible
         only while the wall map is up."""
         lv = self._lv
-        show = bool(getattr(self, "_lv_wall", False)) and self._lv_sax_active()
+        show = (bool(getattr(self, "_lv_wall", False)) and self._lv_sax_active()
+                and not getattr(self, "_ct_lv_hidden", False))   # Simple View
         sa = lv.get("sax_pane") if lv is not None else None
         # bottom→top: green (thick) … red (thin, critical). ASCII labels so they
         # render regardless of the VTK font.
