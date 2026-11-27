@@ -20306,6 +20306,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
+        # Simple View / CoronaryTree: the LV is kept but NOTHING of it is drawn
+        # (the base-cut line lingered after leaving LVモード — user 2026-11-27)
+        if getattr(self, "_ct_lv_hidden", False):
+            return
         # (The old ±2.5 mm axis 'keep-out' band on the long-axis trace pane is no
         # longer drawn: the LV long axis is now DEFINED as apex → MV-plane centre,
         # so it always passes through the MV centre and the band that limited Epi

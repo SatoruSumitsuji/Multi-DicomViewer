@@ -1707,6 +1707,8 @@ class _Overlay(QWidget):
         lv = v._lv
         if lv is None or lv["model"].axis is None:
             return
+        if getattr(v, "_ct_lv_hidden", False):   # Simple View / CoronaryTree
+            return
         ax = lv["model"].axis
 
         def S(pt):

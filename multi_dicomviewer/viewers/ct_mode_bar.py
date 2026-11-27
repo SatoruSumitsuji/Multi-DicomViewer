@@ -1033,6 +1033,11 @@ class CTModeBarMixin:
                     if mm.get("_lvv") == "apex":
                         mm["hidden"] = not on
         _do("_lv_style_selectors")
+        # the LV pane overlay (base-cut line, apex markers, SAX lines …) is
+        # rebuilt now: hidden in Simple View / CoronaryTree, back in LVモード
+        if hasattr(self, "_redraw_lv"):
+            for k in ("A", "B"):
+                _do("_redraw_lv", k)
 
     def _ct_lv_editing_msg(self) -> None:
         try:
