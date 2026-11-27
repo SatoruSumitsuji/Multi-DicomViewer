@@ -1435,9 +1435,13 @@ class CoronaryTreeWindow(SnapDock):
                          "ください。血管を右クリック →「役割」で設定できます。"))
             return
         res = self._tree.connect_all(snap_tol_mm=_CONNECT_TOL_MM)
+        bridged = sum(1 for vid in res["connected"]
+                      if self._bridge_to_parent(vid) > 0)
         self._populate()
         self.treeChanged.emit()
         msg = t("{c} 本を接続しました。", c=len(res["connected"]))
+        if bridged:
+            msg += t("（{b} 本は合流点まで線を延長）", b=bridged)
         if res["unconnected"]:
             msg += t(" 未接続 {u} 本（5mm以内に幹/枝がありません。近い枝を"
                      "先に接続するか、右クリックで親を指定）。",
@@ -3373,8 +3377,57 @@ class CoronaryTreeWindow(SnapDock):
                 d=d, tol=_CONNECT_TOL_MM))
             return
         self._tree.set_parent(vid, new_parent)   # junction = nearest endpoint
+        self._bridge_to_parent(vid)
         self._populate()
         self.treeChanged.emit()
+
+    #: a connected line whose proximal end is farther than this (mm) from
+    #: its connection point is extended to it (shorter = already touching)
+    BRIDGE_MIN_MM = 0.3
+
+    def _bridge_to_parent(self, vid: str) -> float:
+        """After a connect (user 2026-11-27): extend the line's proximal end
+        in a straight line (the shortest way) to its connection point on the
+        parent, so it visibly joins the parent instead of stopping up to
+        5 mm short ("つながってない？"). The .cpr.json is rewritten like
+        Auto-Track (its drawing direction kept), so フォルダ更新 keeps it.
+        Returns the mm added (0 = nothing to do)."""
+        tree = self._tree
+        v = tree.vessels.get(vid)
+        if v is None or v.parent is None or v.n == 0:
+            return 0.0
+        A = tree.anchor(vid)
+        if A is None:
+            return 0.0
+        A = np.asarray(A, float)
+        gap = float(np.linalg.norm(np.asarray(v.points[0], float) - A))
+        if gap <= self.BRIDGE_MIN_MM:
+            return 0.0
+        base = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 1
+                          else v.points, float).reshape(-1, 3)
+        if len(base) and float(np.linalg.norm(base[0] - A)) <= self.BRIDGE_MIN_MM:
+            base = base[1:]                      # (never a duplicate point)
+        ctrl = np.vstack([A[None, :], base])
+        self._set_vessel_ctrl(tree, vid, ctrl)
+        b = self._bundle()
+        path = b["paths"].get(vid, "") or ""
+        old = self._read_cpr(path) if path else None
+        if path and old is not None:
+            fc = np.asarray(old.get("ctrl") or [], float).reshape(-1, 3)
+            out = ctrl
+            # keep the file's drawing direction (it may run distal → proximal)
+            if len(fc) >= 2 and (
+                    np.linalg.norm(fc[0] - ctrl[-1]) + np.linalg.norm(fc[-1] - ctrl[1])
+                    < np.linalg.norm(fc[0] - ctrl[1]) + np.linalg.norm(fc[-1] - ctrl[-1])):
+                out = ctrl[::-1]
+            nd = self._cpr_file_with(old, out)
+            for k in ("auto_traced", "fin_traced"):        # keep its marks
+                if k in old:
+                    nd[k] = old[k]
+            if old.get("ctrl_manual") is not None:
+                nd["ctrl_manual"] = old["ctrl_manual"]
+            self._write_cpr(path, nd)
+        return gap
 
     def _delete(self):
         vid = self.selected_vid()

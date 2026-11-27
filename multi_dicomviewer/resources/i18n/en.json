@@ -966,6 +966,7 @@
   "領域色：": "Territory colour:",
   "（.corotree.json も上書き保存します）": "(The .corotree.json is overwritten too.)",
   "（XA の検出器面の値: 拡大率は未補正）": " (XA detector-plane value: magnification not corrected)",
+  "（{b} 本は合流点まで線を延長）": " ({b} extended to the junction)",
   "（キャンセルで中断）": "(stopped by Cancel)",
   "（上書き）": "(overwrite)",
   "（停止しました。残りの線は未処理です）": "(Stopped. The remaining lines were not processed.)",

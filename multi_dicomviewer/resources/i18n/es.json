@@ -2169,6 +2169,7 @@
   "領域色：": "Color de territorio:",
   "（.corotree.json も上書き保存します）": "(También se sobrescribe el .corotree.json.)",
   "（XA の検出器面の値: 拡大率は未補正）": " (valor en el plano del detector XA: magnificación no corregida)",
+  "（{b} 本は合流点まで線を延長）": " ({b} prolongada(s) hasta la unión)",
   "（キャンセルで中断）": "(detenido con Cancelar)",
   "（上書き）": "(sobrescribir)",
   "（停止しました。残りの線は未処理です）": "(Detenido. Las líneas restantes no se procesaron.)",
