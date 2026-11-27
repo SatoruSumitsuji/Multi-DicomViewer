@@ -91,6 +91,18 @@ class TraceParams:
     ctrl_tol_mm: float = 0.12       # max deviation of the CPR spline from path
     gap_L: float = 0.15             # L below this counts as "outside lumen"
     gap_min_mm: float = 2.0         # report gaps at least this long
+    # Between two clicked points the line must not TURN BACK or balloon (user
+    # 2026-11-27: "CPR線が戻る" / "異常に長くなる" forbidden - a true hairpin is
+    # set by hand later). The path search only takes steps that do not go
+    # back along the click->click chord (cos >= -back_cos), inside an ellipse
+    # around the two clicks; a segment still longer than max_len_ratio x chord
+    # (or chord + max_len_add_mm) becomes the straight chord, reported as a gap.
+    no_backtrack: bool = True
+    back_cos: float = 0.15          # a step may lean back at most ~99 deg off
+    corridor_ratio: float = 1.6     # ellipse: |x-p0|+|x-p1| <= ratio * chord ...
+    corridor_add_mm: float = 8.0    # ... or chord + this (short segments)
+    max_len_ratio: float = 1.8      # segment length limit = ratio * chord ...
+    max_len_add_mm: float = 10.0    # ... or chord + this, whichever is larger
 
 
 @dataclass
@@ -277,10 +289,12 @@ def _snap(L, k, radius_vox, sigma_vox):
     return (zs.start + j[0], ys.start + j[1], xs.start + j[2])
 
 
-def _min_path(cost, node_mask, a, b, step):
+def _min_path(cost, node_mask, a, b, step, fwd=None, back_cos=0.15):
     """Dijkstra from voxel a to b over voxels in node_mask (26-neighbour,
     edge = mean cost × length). Returns (list of (z,y,x), total cost) or
-    (None, inf) when b is unreachable."""
+    (None, inf) when b is unreachable. *fwd* (unit chord direction, z/y/x
+    index space): DIRECTED graph - a step leaning back along *fwd* by more
+    than *back_cos* (cosine) is not allowed, so the path never turns round."""
     shape = cost.shape
     node_mask = node_mask.copy()
     node_mask[a] = True; node_mask[b] = True
@@ -298,14 +312,25 @@ def _min_path(cost, node_mask, a, b, step):
         if not m.any():
             continue
         length = step * float(np.sqrt(dz * dz + dy * dy + dx * dx))
-        rows.append(ids[src][m]); cols.append(ids[dst][m])
-        wts.append(0.5 * (cost[src][m] + cost[dst][m]) * length)
+        w = 0.5 * (cost[src][m] + cost[dst][m]) * length
+        if fwd is None:
+            rows.append(ids[src][m]); cols.append(ids[dst][m])
+            wts.append(w)
+            continue
+        c = float(np.dot((dz, dy, dx), fwd)) / float(
+            np.sqrt(dz * dz + dy * dy + dx * dx))
+        if c >= -back_cos:                       # src -> dst allowed
+            rows.append(ids[src][m]); cols.append(ids[dst][m]); wts.append(w)
+        if -c >= -back_cos:                      # dst -> src allowed
+            rows.append(ids[dst][m]); cols.append(ids[src][m]); wts.append(w)
     n = flat.size
+    if not wts:
+        return None, float("inf")
     G = coo_matrix((np.concatenate(wts), (np.concatenate(rows),
                                           np.concatenate(cols))),
                    shape=(n, n)).tocsr()
     ia = int(ids[a]); ib = int(ids[b])
-    dist, pred = dijkstra(G, directed=False, indices=ia,
+    dist, pred = dijkstra(G, directed=fwd is not None, indices=ia,
                           return_predecessors=True)
     if not np.isfinite(dist[ib]):
         return None, float("inf")
@@ -556,6 +581,7 @@ def trace_vessel(vol, dims, points_mm, prm: TraceParams | None = None,
         return TraceResult(np.zeros((0, 3)), np.zeros((0, 3)), 0.0,
                            ok=False, message="need at least 2 points")
     dense, Lprof, costs = [], [], []
+    straight = []                    # [(p0, p1)] segments replaced by the chord
     ext = _vol_extent(dims, vol.shape)
     nseg = len(pts) - 1
     for si, (p0, p1) in enumerate(zip(pts[:-1], pts[1:])):
@@ -583,11 +609,33 @@ def trace_vessel(vol, dims, points_mm, prm: TraceParams | None = None,
             report("path", si + 1, nseg, 0.8 * (si + 0.6) / nseg)
             core = ndimage.binary_dilation(
                 gate > 0.1, iterations=max(1, int(round(1.0 / step))))
-            path, c = _min_path(cost, core & (sm > prm.hu_floor), a, b, step)
+            fwd, allow = None, np.ones(shape, bool)
+            chord = float(np.linalg.norm(p1 - p0))
+            if prm.no_backtrack and chord > 1e-6:
+                fwd = ((p1 - p0) / chord)[::-1]          # z, y, x
+                # broadcast 1-D axes (float32): no (N, 3) array on a big ROI
+                ax = [(origin[i] + step * np.arange(shape[2 - i])
+                       ).astype(np.float32) for i in range(3)]   # x, y, z
+                gx = ax[0][None, None, :]
+                gy = ax[1][None, :, None]
+                gz = ax[2][:, None, None]
+
+                def _d(q):
+                    q = np.asarray(q, np.float32)
+                    return np.sqrt((gx - q[0]) ** 2 + (gy - q[1]) ** 2
+                                   + (gz - q[2]) ** 2)
+                lim = max(prm.corridor_ratio * chord,
+                          chord + prm.corridor_add_mm)
+                allow = (_d(p0) + _d(p1)) <= lim
+
+            def mp(mask, allow=allow, fwd=fwd, a=a, b=b, step=step, cost=cost):
+                return _min_path(cost, mask & allow, a, b, step, fwd,
+                                 prm.back_cos)
+            path, c = mp(core & (sm > prm.hu_floor))
             if path is None:
-                path, c = _min_path(cost, sm > prm.hu_floor, a, b, step)
+                path, c = mp(sm > prm.hu_floor)
             if path is None:                     # pruned graph disconnected
-                path, c = _min_path(cost, np.ones(shape, bool), a, b, step)
+                path, c = mp(np.ones(shape, bool))
             if path is None:
                 return TraceResult(np.zeros((0, 3)), np.zeros((0, 3)), 0.0,
                                    ok=False, message="no path between points")
@@ -608,6 +656,17 @@ def trace_vessel(vol, dims, points_mm, prm: TraceParams | None = None,
         zyx = np.asarray(path, float)
         xyz = origin + step * zyx[:, ::-1]
         Lp = L[tuple(np.asarray(path).T)]
+        if prm.no_backtrack:
+            seg_len = float(np.sum(np.linalg.norm(np.diff(xyz, axis=0),
+                                                  axis=1)))
+            chord = float(np.linalg.norm(p1 - p0))
+            if seg_len > max(prm.max_len_ratio * chord,
+                             chord + prm.max_len_add_mm):
+                # abnormally long -> the straight chord between the clicks
+                n = max(2, int(np.ceil(chord / step)) + 1)
+                xyz = np.linspace(p0, p1, n)
+                Lp = np.zeros(n)
+                straight.append((p0.copy(), p1.copy()))
         if dense:                                # drop the duplicated joint
             xyz, Lp = xyz[1:], Lp[1:]
         dense.append(xyz); Lprof.append(Lp)
@@ -624,6 +683,15 @@ def trace_vessel(vol, dims, points_mm, prm: TraceParams | None = None,
     Pd = _resample(Pd, prm.sample_mm)
     length = float(np.sum(np.linalg.norm(np.diff(Pd, axis=0), axis=1)))
     gaps = _find_gaps(volf, dims, Pd, prm)
+    if straight:                     # replaced segments are gaps to review
+        s = np.concatenate([[0.0], np.cumsum(
+            np.linalg.norm(np.diff(Pd, axis=0), axis=1))])
+        for q0, q1 in straight:
+            i0 = int(np.argmin(np.linalg.norm(Pd - q0, axis=1)))
+            i1 = int(np.argmin(np.linalg.norm(Pd - q1, axis=1)))
+            a0, a1 = sorted((float(s[i0]), float(s[i1])))
+            gaps.append((a0, a1))
+        gaps.sort()
     report("ctrl", nseg, nseg, 0.93)
     ctrl = _adaptive_ctrl(Pd, prm)
     return TraceResult(Pd, ctrl, length, gaps=gaps, seg_costs=costs, ok=True)
