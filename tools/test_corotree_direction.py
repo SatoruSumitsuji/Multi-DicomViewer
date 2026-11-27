@@ -220,4 +220,6 @@ check("… D9's territory holds D9a",
       "d9a" in t6.distal_set("d9", t6.proximal_idx("d9"))[2])
 
 print("ALL PASS" if not fails else f"{len(fails)} FAILED")
-sys.exit(1 if fails else 0)
+sys.stdout.flush()
+# skip Qt teardown of the docks (a crash at exit, after the checks)
+os._exit(1 if fails else 0)

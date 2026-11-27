@@ -16935,12 +16935,42 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._lvv_vol_lbl.setText("--")
             self._lvv_sync()
 
+
+    # 「SAX」 guide (user 2026-11-27): once the Epi border is traced on EVERY
+    # long-axis plane, the next step is SAX — its button gets a bright frame
+    # so it is found at once; plain again in SAX / with a plane missing.
+    _LV_SAX_HINT_CSS = "QPushButton{border:3px solid #00d0ff;border-radius:4px;}"
+
+    def _lv_sax_hint_due(self) -> bool:
+        lv = self._lv
+        if (lv is None or lv.get("phase") != "contour"
+                or lv.get("pass") != "epi" or lv.get("sax") is not None):
+            return False
+        m = lv["model"]
+        try:
+            done = {round(float(a) % 360.0, 3) for a in m.epi_planes}
+            need = {round(float(a) % 360.0, 3) for a in m.plane_angles()}
+        except Exception:                                # noqa: BLE001
+            return False
+        return bool(need) and need <= done
+
+    def _lv_sax_hint_sync(self) -> None:
+        b = getattr(self, "_lv_sax_btn", None)
+        if b is None:
+            return
+        on = self._lv_sax_hint_due()
+        if bool(b.property("sax_hint")) == on and b.property("sax_hint") is not None:
+            return
+        b.setProperty("sax_hint", on)
+        b.setStyleSheet(("QPushButton:checked{background:#b8860b;color:white;}") + (self._LV_SAX_HINT_CSS if on else ""))
+
     def _lv_sync_buttons(self) -> None:
         """Colour + enable the LV bar by the current pass/phase (mirror the VTK
         viewer). Only the active pass's Endo/Epi is coloured; Set axis is
         dark-yellow while its axis is in use (ready/apex/contour); Trace is red
         while tracing (apex/contour). LIFO enable: only the last-turned-on of
         {Set axis, Trace, SAX} can be turned off."""
+        self._lv_sax_hint_sync()          # SAX frame (all Epi planes)
         lv = self._lv
         endo_btn, epi_btn = self._lv_endo_btn, self._lv_epi_btn
         setax, trace = self._lv_setaxis_btn, self._lv_trace_btn
@@ -18052,6 +18082,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._redraw_meas(pane)
         self._lv_redraw_all()
         self._lv_record_create(pane, m)   # Ctrl+Z removes the whole new border
+        self._lv_sax_hint_sync()       # all planes traced → SAX framed
 
     def lv_nav_key(self, where: str) -> bool:
         """A / F (via MainWindow._nav_active) step the long-axis plane while
@@ -18507,6 +18538,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_result_lines = []
         if self._lv_sax_active():
             self._overlay[self._lv["sax_pane"]].update()
+        self._lv_sax_hint_sync()       # a plane removed → SAX frame off
 
     def _lv_line_set_grabbed(self, which, on: bool) -> None:
         if self._lv_line_hi.get(which) == bool(on):
