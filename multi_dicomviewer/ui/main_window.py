@@ -2098,6 +2098,13 @@ class MainWindow(QMainWindow):
         _spin.setMaximumWidth(52)
         _spin.clicked.connect(lambda: self._sv_action("spin_snap"))
         r1.addWidget(_spin)
+        # Spin= (as in the CT viewers, right of Spin+): head up / feet down
+        self._sv_spin_eq_btn = QPushButton(t("Spin="))
+        self._sv_spin_eq_btn.setMaximumWidth(58)
+        self._sv_spin_eq_btn.setToolTip(t("Spin=：断面の中で画像を回し、体の頭側を上・尾側を下にそろえます（左室短軸なら肝臓側の下縁が水平に）。Shift+クリックで両ペイン"))
+        self._sv_spin_eq_btn.clicked.connect(
+            lambda: self._sv_action("spin_eq_snap"))
+        r1.addWidget(self._sv_spin_eq_btn)
         self._sv_wb_btn = QPushButton(t("WB reverse")); self._sv_wb_btn.setCheckable(True)
         self._sv_wb_btn.clicked.connect(self._sv_wb)
         r1.addWidget(self._sv_wb_btn)

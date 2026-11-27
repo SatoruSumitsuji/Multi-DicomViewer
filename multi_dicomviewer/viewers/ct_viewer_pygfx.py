@@ -4640,6 +4640,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             sb.setHelpToolTip(t(
                 "Snap the centreline to the nearest vertical/horizontal "
                 "(45° snaps clockwise)"))
+        sp = getattr(self, "_spin_eq_btn", None)
+        if sp is not None:
+            sp.setText(t("Spin="))
+            sp.setHelpToolTip(t("Spin=：断面の中で画像を回し、体の頭側を上・尾側を下にそろえます（左室短軸なら肝臓側の下縁が水平に）。Shift+クリックで両ペイン"))
         b = getattr(self, "_invert_btn", None)
         if b is not None:
             b.setText(t("WB reverse"))
@@ -4928,11 +4932,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "(45° snaps clockwise). Shift+click snaps BOTH panes"))
         self._spin_snap_btn.clicked.connect(self._spin_snap)
         row2.addWidget(self._spin_snap_btn)
-        # Spine= (user 2026-11-27): head up / feet down on the section
-        self._spine_btn = FitButton(t("Spine="))
-        self._spine_btn.setHelpToolTip(t("Spine=：断面の中で画像を回し、体の頭側を上・尾側を下にそろえます（左室短軸なら肝臓側の下縁が水平に）。Shift+クリックで両ペイン"))
-        self._spine_btn.clicked.connect(self._spine_snap)
-        row2.addWidget(self._spine_btn)
+        # Spin= (user 2026-11-27): head up / feet down on the section
+        self._spin_eq_btn = FitButton(t("Spin="))
+        self._spin_eq_btn.setHelpToolTip(t("Spin=：断面の中で画像を回し、体の頭側を上・尾側を下にそろえます（左室短軸なら肝臓側の下縁が水平に）。Shift+クリックで両ペイン"))
+        self._spin_eq_btn.clicked.connect(self._spin_eq_snap)
+        row2.addWidget(self._spin_eq_btn)
         # Grayscale invert (black↔white negative) — right of Spin+.
         self._invert_btn = FitButton(t("WB reverse"))
         self._invert_btn.setCheckable(True)
@@ -5649,8 +5653,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         return True
 
 
-    def _spine_foot_dir(self, key):
-        """Spine= : the patient's FOOT (caudal) direction projected on pane
+    def _spin_eq_foot_dir(self, key):
+        """Spin= : the patient's FOOT (caudal) direction projected on pane
         *key*'s section, as an output-plane (x, y) unit vector — or None when
         the section is (nearly) across the body axis, a VR pane, or 2-D.
         Computed in patient space (pbasis @ u / v), so a left-handed basis
@@ -5671,8 +5675,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return None
         return fu / nrm, fv / nrm
 
-    def _spine_snap(self) -> None:
-        """Spine= : roll the ACTIVE pane so the body's head is up and its feet
+    def _spin_eq_snap(self) -> None:
+        """Spin= : roll the ACTIVE pane so the body's head is up and its feet
         down (the head-foot axis vertical on screen). Shift+click: both
         panes. The frame / measurements are unchanged (a camera roll)."""
         from PyQt6.QtWidgets import QApplication
@@ -5686,30 +5690,30 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         changed = False
         none = 0
         for key in keys:
-            if self._spine_foot_dir(key) is None:
+            if self._spin_eq_foot_dir(key) is None:
                 none += 1
                 continue
-            if self._spine_snap_pane(key):
+            if self._spin_eq_snap_pane(key):
                 changed = True
         if changed:
             self._view_initial = False
-            self._spine_refresh(keys)
+            self._spin_eq_refresh(keys)
             self._undo_view(before, self._view_snapshot())
         elif none == len(keys):
             try:
                 self.window().statusBar().showMessage(t(
-                    "Spine=：この断面は体軸にほぼ垂直なので、頭尾の向きが"
+                    "Spin=：この断面は体軸にほぼ垂直なので、頭尾の向きが"
                     "決まりません"), 6000)
             except Exception:                    # noqa: BLE001
                 pass
 
-    def _spine_refresh(self, keys) -> None:
+    def _spin_eq_refresh(self, keys) -> None:
         self._refresh(only=None if len(keys) > 1 else keys[0])
 
-    def _spine_snap_pane(self, key) -> bool:
+    def _spin_eq_snap_pane(self, key) -> bool:
         """Roll pane *key* so the patient's feet point straight down (screen
         y is down here → +90°); roll delta = screen-angle delta (as Spin+)."""
-        d = self._spine_foot_dir(key)
+        d = self._spin_eq_foot_dir(key)
         if d is None:
             return False
         ccx, ccy = self._cc(key)
@@ -8423,6 +8427,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._2d_transform(arg)
         elif name == "spin_snap":
             self._spin_snap()
+        elif name == "spin_eq_snap":                   # Spin= (SyncCT)
+            self._spin_eq_snap()
         elif name == "wb":
             self._invert_btn.setChecked(bool(arg))
             self._toggle_invert()
