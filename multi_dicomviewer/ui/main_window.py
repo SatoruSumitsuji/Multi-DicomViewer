@@ -76,6 +76,7 @@ from multi_dicomviewer.ui.study_browser import (
     SERIES_MIME,
     STUDY_MIME,
     FitButton,
+    OutlineWhenOffButton,
     StudyPanel,
 )
 from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
@@ -3742,6 +3743,22 @@ class MainWindow(QMainWindow):
             w._use_uid(u)
         return bool(w.save_territory())
 
+    def ct_file_save(self, viewer, kind: str) -> bool:
+        """The readout's 未保存 button (user 2026-11-28): save the CT's
+        corotree ("tree", the Save dialog) or Territory ("terr")."""
+        if kind == "terr":
+            return self.ct_territory_save(viewer)
+        if kind != "tree":
+            return False
+        w, uid = self._ct_tree_dock_for(viewer)
+        if w is None:
+            return False
+        u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+        if u and hasattr(w, "_use_uid"):
+            w._use_uid(u)
+        w._save_as()
+        return True
+
     def _territory_resolve_link(self, data, link: str, base: str, which: str):
         """Resolve a .territory.json LINK to an existing file: the stored path,
         else relative to the territory.json's folder, else by name beside it. On
@@ -4187,6 +4204,181 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 nm = ""
             self.coronary_auto_extend_report(viewer, out, name=nm, w=w)
+        return out
+
+    # ---- 全冠動脈描出 (user 2026-11-28) ---------------------------------------
+    def coronary_auto_tree(self, viewer):
+        """「全冠動脈描出」 on *viewer*: set the ostia (LM, or LAD + LCX, and
+        RCA) at the centreline crossing one after another, then extract the
+        whole tree (core.coronary_autotree) inside the LV Epi shell + the
+        RCA corridor, and register every line."""
+        from multi_dicomviewer.ui.autotree_ostia import OstiaDialog
+        import numpy as np
+        if getattr(viewer, "_vol", None) is None:
+            return None
+        old = getattr(self, "_autotree_dlg", None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:                            # noqa: BLE001
+                pass
+
+        def here():
+            c = getattr(viewer, "_center", None)
+            return None if c is None else np.asarray(c, float).copy()
+
+        dlg = OstiaDialog(self, here,
+                          lambda ost: self.coronary_auto_tree_run(viewer, ost))
+        self._autotree_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        return dlg
+
+    def _autotree_epi(self, viewer):
+        """(epi bool zyx, origin mm, apex, axis_dir) of *viewer*'s CT — the
+        in-session Epi, else the docked FullLv's — or None."""
+        from multi_dicomviewer.core.lv_function import decode_mask
+        import numpy as np
+        epi_d = None
+        f = getattr(viewer, "_full_lv_epi_dict", None)
+        if callable(f):
+            try:
+                epi_d = f()
+            except Exception:                            # noqa: BLE001
+                epi_d = None
+        if not (isinstance(epi_d, dict) and epi_d.get("region")):
+            w = getattr(self, "_corotree_win", None)
+            pane = self._pane_of_viewer(viewer)
+            uid = (pane.shown_series_uid() or "") if pane is not None else ""
+            full = None
+            if w is not None and uid:
+                try:
+                    full = w.full_lv_for_series(uid)
+                except Exception:                        # noqa: BLE001
+                    full = None
+            epi_d = (full or {}).get("epi") if isinstance(full, dict) else None
+        comp, bb = decode_mask((epi_d or {}).get("region"))
+        if comp is None:
+            return None
+        sx, sy, sz = (float(d) for d in viewer._dims)
+        origin = (bb[4] * sx, bb[2] * sy, bb[0] * sz)
+        ax = (epi_d or {}).get("axis") or {}
+        apex = getattr(viewer, "_lv_apex", None)
+        if apex is None and ax.get("apex"):
+            apex = ax.get("apex")
+        return (comp, origin,
+                None if apex is None else np.asarray(apex, float),
+                np.asarray(ax["dir"], float) if ax.get("dir") else None)
+
+    def coronary_auto_tree_run(self, viewer, ostia):
+        """Run the extraction for the set *ostia* and register the lines."""
+        import os
+        from datetime import datetime
+        from PyQt6.QtWidgets import QMessageBox
+        from multi_dicomviewer.core.coronary_autotree import (
+            extract_coronary_tree)
+        import numpy as np
+        from multi_dicomviewer.ui.autotrack_progress import (
+            AutoTrackProgress, show_result)
+        vol = getattr(viewer, "_vol", None)
+        dims = getattr(viewer, "_dims", None)
+        if vol is None or dims is None or not ostia:
+            return None
+        epi = self._autotree_epi(viewer)
+        if epi is None:
+            if QMessageBox.question(
+                    self, t("全冠動脈描出"),
+                    t("この CT には左室 Epi がありません。Epi なし（起始部からの"
+                      "内腔の連続性だけ）で抽出しますか？\n（Epi を設定すると精度が"
+                      "上がり、未接続血管も探せます）")) \
+                    != QMessageBox.StandardButton.Yes:
+                return None
+        w = self._open_coronary_tree()
+        if w is None:
+            return None
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        series = (viewer._lv_series_meta()
+                  if hasattr(viewer, "_lv_series_meta") else {}) or {}
+        src_dir = (viewer._lv_series_dir()
+                   if hasattr(viewer, "_lv_series_dir") else "") or ""
+        u = w.uid_for_series(uid) if (uid and hasattr(w, "uid_for_series")) \
+            else ""
+        w._use_uid(u or series.get("series_uid", "") or uid,
+                   ct_dir=src_dir, series=series)
+        replace = True
+        if w._tree.vessels:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(t("全冠動脈描出"))
+            box.setText(t("この CT にはツリー（{n} 本）があります。抽出した線で"
+                          "置き換えますか？（今の .cpr.json は変更しません）",
+                          n=len(w._tree.vessels)))
+            rb = box.addButton(t("置き換える"), QMessageBox.ButtonRole.AcceptRole)
+            ab = box.addButton(t("追加する"), QMessageBox.ButtonRole.ActionRole)
+            box.addButton(t("中止"), QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is rb:
+                replace = True
+            elif box.clickedButton() is ab:
+                replace = False
+            else:
+                return None
+        base = self._viewer_next_dir(viewer)
+        if not base and hasattr(viewer, "_cpr_next_pick_dir"):
+            base = viewer._cpr_next_pick_dir()
+        if not base:
+            return None
+        folder = os.path.join(base, "AutoTree_"
+                              + datetime.now().strftime("%Y%m%d_%H%M%S"))
+        stages = {"ROI": t("範囲を準備中"), "Epi": t("Epi 面からの距離を計算中"),
+                  "space": t("探索範囲を作成中"), "lumen": t("内腔を抽出中"),
+                  "gaps": t("途切れをつなぎ中"), "centreline": t("中心線を作成中"),
+                  "unconnected": t("未接続血管を探索中")}
+        try:
+            panes = getattr(viewer, "pane", None) or {}
+            anchor = ([panes[k].canvas for k in ("A", "B") if k in panes]
+                      or viewer)
+            with AutoTrackProgress(self, name=t("全冠動脈描出"),
+                                   anchor=anchor) as pg:
+                res = extract_coronary_tree(
+                    vol, dims, ostia,
+                    epi=None if epi is None else epi[0],
+                    epi_origin_mm=None if epi is None else epi[1],
+                    apex=None if epi is None else epi[2],
+                    axis_dir=None if epi is None else epi[3],
+                    progress=lambda s: pg.update(
+                        "autotree", 0, 0, name=stages.get(s, s)),
+                    cancel=pg.cancelled)
+        except Exception as exc:                         # noqa: BLE001
+            traceback.print_exc()
+            show_result(self, t("全冠動脈描出でエラーが発生しました: {e}",
+                                e=f"{type(exc).__name__}: {exc}"), ok=False)
+            return None
+        if res.stop == "cancel":
+            show_result(self, t("全冠動脈描出を停止しました。"), ok=False)
+            return None
+        if res.stop == "no-seed":
+            show_result(self, t("全冠動脈描出：起始部の近くに造影された内腔が"
+                                "見つかりません。十字を起始部の内腔の中心に合わせて"
+                                "やり直してください。"), ok=False)
+            return None
+        if not res.vessels:
+            show_result(self, t("全冠動脈描出：冠動脈が見つかりませんでした。"),
+                        ok=False)
+            return None
+        out = w.install_auto_tree(res.vessels, folder, series=series,
+                                  src_dir=src_dir, replace=replace)
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        if hasattr(viewer, "_ct_mode_auto"):
+            try:
+                viewer._ct_mode_auto("coronary")
+            except Exception:                            # noqa: BLE001
+                pass
+        show_result(self, w.auto_tree_text(out) + "\n"
+                    + t("（{s:.0f} 秒・保存先 {f}）", s=res.log.get("seconds", 0),
+                        f=os.path.basename(folder)))
         return out
 
     def coronary_batch_extend(self, viewer):
@@ -6860,7 +7052,8 @@ class MainWindow(QMainWindow):
         # left-click masks the case info on every display, right-click picks
         # which tags are anonymized.
         row.addSpacing(12)
-        self._anon_btn = FitButton(t("Anonymous"))
+        # framed while NOT anonymized (user 2026-11-28); checked = as before
+        self._anon_btn = OutlineWhenOffButton(t("Anonymous"))
         self._anon_btn.setCheckable(True)
         self._anon_btn.setChecked(bool(getattr(self, "_anon", False)))
         self._anon_btn.setHelpToolTip(t('Left-click: mask patient/case info on all on-screen displays (files unchanged).\nRight-click: choose which tags to anonymize (also used by Export (Anon DICOM)).'))

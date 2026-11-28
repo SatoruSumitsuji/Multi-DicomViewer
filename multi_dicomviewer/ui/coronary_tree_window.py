@@ -2382,6 +2382,8 @@ class CoronaryTreeWindow(SnapDock):
             stem = path[:-5] if path.lower().endswith(".json") else path
             path = stem + ".territory.json"
         try:
+            from multi_dicomviewer.core.file_backup import backup_existing
+            backup_existing(path)                # the previous version → .bak
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except OSError as exc:
@@ -4067,6 +4069,73 @@ class CoronaryTreeWindow(SnapDock):
         self._hint.setText(self.auto_extend_text(v.name, out))
         return out
 
+    def install_auto_tree(self, vessels, folder: str, series=None,
+                          src_dir: str = "", replace: bool = True) -> dict:
+        """全冠動脈描出 (user 2026-11-28): the extracted lines
+        (core.coronary_autotree.AutoVessel, parents first) become the tree of
+        the ACTIVE CT — each its own NN.cpr.json in *folder* (auto_traced),
+        the ostium lines as LM / LAD / LCX / RCA roots, every branch hung on
+        its parent where it leaves it, the 未接続血管 left unconnected.
+        *replace*: the current tree is replaced (its files are not
+        touched). {"lines", "roots", "branches", "unconnected", "paths"}."""
+        b = self._bundle()
+        if series:
+            b["series"] = dict(series)
+        if src_dir and not b.get("ct_dir"):
+            b["ct_dir"] = src_dir
+        if replace:
+            self._tree = CoronaryTree()
+            b["tree"] = self._tree
+            b["paths"].clear()
+            b["hidden"].clear()
+        tree = self._tree
+        os.makedirs(folder, exist_ok=True)
+        made, out = {}, {"lines": 0, "roots": 0, "branches": 0,
+                         "unconnected": 0, "paths": []}
+        for av in vessels:
+            ctrl = np.asarray(av.ctrl, float)
+            if len(ctrl) < 2:
+                continue
+            name = self._serial_name(folder)
+            vid = self._unique_vid()
+            pts = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM).points
+            nv = tree.add_vessel(vid, name, av.role if av.role in ROOT_ROLES
+                                 else "branch", pts, ctrl=ctrl)
+            nv.auto_traced = True
+            pv = made.get(av.parent) if av.parent is not None else None
+            if pv is not None and pv in tree.vessels:
+                par = tree.vessels[pv]
+                nv.parent = pv
+                nv.junction = int(np.argmin(
+                    np.linalg.norm(par.points - pts[0], axis=1)))
+                tree._set_anchor(vid)
+                out["branches"] += 1
+            elif nv.role in ROOT_ROLES:
+                out["roots"] += 1
+            else:
+                out["unconnected"] += 1
+            p = os.path.join(folder, name + ".cpr.json")
+            rec = self._cpr_file_with(None, ctrl, b.get("series"),
+                                      b.get("ct_dir", "") or src_dir)
+            rec["auto_traced"] = True
+            if self._write_cpr(p, rec):
+                b["paths"][vid] = p
+                out["paths"].append(p)
+            made[av.key] = vid
+            out["lines"] += 1
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(self.auto_tree_text(out))
+        return out
+
+    @staticmethod
+    def auto_tree_text(out) -> str:
+        return t("全冠動脈描出：{n} 本（幹 {r} / 枝 {b} / 未接続 {u}）を登録しました。"
+                 "役割・名前を確認し、必要なら線を修正してください。",
+                 n=out.get("lines", 0), r=out.get("roots", 0),
+                 b=out.get("branches", 0), u=out.get("unconnected", 0))
+
     def batch_targets_to_tree(self) -> list:
         """一括描出's lines: every branch line not connected yet (parent
         None, role 枝) of the active CT."""
@@ -4906,6 +4975,8 @@ class CoronaryTreeWindow(SnapDock):
                             os.path.abspath(cp), base).replace("\\", "/")
                     except ValueError:          # another drive → absolute
                         d["cpr_file"] = os.path.abspath(cp)
+            from multi_dicomviewer.core.file_backup import backup_existing
+            backup_existing(path)                # the previous version → .bak
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self._last_path = path

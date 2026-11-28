@@ -2687,6 +2687,19 @@ class CPRMixin:
             return None
         return shell.coronary_batch_extend(self)
 
+    def _coro_auto_tree(self):
+        """「全冠動脈描出」 (user 2026-11-28): set the ostia, then extract the
+        whole coronary tree (see MainWindow.coronary_auto_tree)."""
+        if getattr(self, "_coronary_mpr_pending", False):
+            self._cpr_autotrack_hint(t("描画中です。右クリックで線を確定してから"
+                                       "「全冠動脈描出」を押してください。"))
+            return None
+        shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
+                 else None)
+        if shell is None or not hasattr(shell, "coronary_auto_tree"):
+            return None
+        return shell.coronary_auto_tree(self)
+
     def _cpr_autotrack_ok(self, which, mi, vi) -> bool:
         """Auto-Track on the distal edit point of a CPR line."""
         if getattr(self, "_mode", "3D") != "3D" or not self._coro_work_on():

@@ -177,6 +177,11 @@ class AutoTrackProgress:
     def update(self, stage, line_mm, total_mm, k=0, n=0, name="") -> None:
         if self._dlg is None:
             return
+        if stage == "autotree":              # 全冠動脈描出: its stage
+            s = t("全冠動脈描出：{s}…", s=name)
+            self._dlg.setLabelText(s + "\n" + t("右クリックで停止"))
+            QApplication.processEvents()
+            return
         if stage == "batch":                 # 一括描出: line k of n
             s = t("一括描出 {k} / {n}：「{nm}」を近位へ追跡中… {a:.0f} mm",
                   k=k, n=n, nm=name, a=line_mm)

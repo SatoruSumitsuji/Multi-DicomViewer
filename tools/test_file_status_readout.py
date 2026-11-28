@@ -147,6 +147,64 @@ check("Targets changed → only territory marked", txt.count(mark) == 1
 txt = line({"full": "", "tree": "", "tree_mem": True})
 check("unsaved tree (no file) → no mark (already 未保存)", mark not in txt, txt)
 
+# ---- 保存済み / 未保存 button right of each file (user 2026-11-28) ----------
+sbt = v._ct_file_save_btns
+U, S = t("未保存"), t("保存済み")
+
+
+def states():
+    return {k: (sbt[k].text() if not sbt[k].isHidden() else None)
+            for k in ("full", "tree", "terr")}
+
+
+v._full_lv_mark_clean()
+line(base)
+check("all three saved → three 保存済み", states() == {
+    "full": S, "tree": S, "terr": S}, states())
+line(dict(base, tree_dirty=True))
+check("corotree edited → corotree + territory 未保存", states() == {
+    "full": S, "tree": U, "terr": U}, states())
+v._full_lv_saved = False
+line({"full": "", "tree": "", "tree_mem": True})
+check("LV measured (no file) + tree registered (no file) → both 未保存, "
+      "no territory button", states() == {"full": U, "tree": U, "terr": None},
+      states())
+asked, saved_kinds = [], []
+sh.ct_file_save = lambda viewer, kind: saved_kinds.append(kind)
+QMessageBox.question = staticmethod(
+    lambda *a, **k: (asked.append(a[2]), QMessageBox.StandardButton.No)[1])
+sbt["tree"].click()
+check("未保存 click → 「保存しますか？」; No → nothing saved",
+      len(asked) == 1 and "corotree" in asked[0] and not saved_kinds, asked)
+QMessageBox.question = staticmethod(
+    lambda *a, **k: QMessageBox.StandardButton.Yes)
+sbt["tree"].click()
+check("… Yes → that file's save (the Save dialog)", saved_kinds == ["tree"],
+      saved_kinds)
+line(base)
+asked.clear()
+sbt["tree"].click()
+check("保存済み click → nothing", saved_kinds == ["tree"] and not asked)
+
+# .bak: the previous version is kept on every overwrite
+from multi_dicomviewer.core.file_backup import backup_existing  # noqa: E402
+with open(coro_p, encoding="utf-8") as f:
+    before = f.read()
+w._tree.vessels["lad"].name = "LAD-again"
+w._write_to(coro_p)
+bak = coro_p + ".bak"
+with open(bak, encoding="utf-8") as f:
+    kept = f.read()
+check("corotree overwrite → the previous version in .corotree.json.bak",
+      kept == before and "LAD-again" not in kept, bak)
+check("no file yet → no .bak", backup_existing(os.path.join(D, "x.json")) == "")
+src_all = "".join((ROOT / p).read_text(encoding="utf-8") for p in (
+    "multi_dicomviewer/viewers/ct_viewer.py",
+    "multi_dicomviewer/viewers/ct_viewer_pygfx.py",
+    "multi_dicomviewer/ui/coronary_tree_window.py"))
+check("FullLv (both viewers) / corotree / territory saves keep a .bak",
+      src_all.count("backup_existing(path)") == 4)
+
 # FullLV button: green only while saved AND unchanged
 v._full_lv_saved = True
 v._full_lv_mark_clean()

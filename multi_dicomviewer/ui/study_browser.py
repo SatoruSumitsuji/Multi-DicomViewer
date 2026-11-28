@@ -269,6 +269,30 @@ class FitButton(QPushButton):
             super().setToolTip(tip)
 
 
+class OutlineWhenOffButton(FitButton):
+    """A checkable FitButton with an outline while it is NOT checked (user
+    2026-11-28: the top-row 「匿名化」 button is framed while the case info is
+    shown, so the unmasked state stands out; once checked it keeps the native
+    checked look). The frame is painted over the native button — no
+    stylesheet, so the native checked / pressed look is untouched."""
+
+    OUTLINE = "#d9480f"
+
+    def paintEvent(self, e) -> None:  # noqa: N802 (Qt override)
+        super().paintEvent(e)
+        if self.isChecked():
+            return
+        from PyQt6.QtGui import QPen
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(self.OUTLINE))
+        pen.setWidthF(2.0)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 3.0, 3.0)
+        p.end()
+
+
 def _start_series_drag(source: QWidget, series: Series) -> None:
     """Begin dragging *series* out of the info panel onto a viewer pane.
     A hidden (greyed) series can still be dragged: like a direct mouse

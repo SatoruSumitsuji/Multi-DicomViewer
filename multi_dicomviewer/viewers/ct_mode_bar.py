@@ -531,6 +531,7 @@ class CTModeBarMixin:
         row.addWidget(self._ct_files_lbl)
         self._ct_file_lbls = {}
         self._ct_unload_btns = {}
+        self._ct_file_save_btns = {}             # kind → 保存済み / 未保存
         self._ct_file_off = {}                   # kind → Unloaded (↻ shown)
         icon = self._ct_unload_icon()
         self._ct_terr_button()                   # Calc / Load / Save
@@ -556,8 +557,16 @@ class CTModeBarMixin:
             b.setVisible(False)
             b.clicked.connect(lambda _=False, k=kind: self._ct_unload_clicked(k))
             row.addWidget(b)
+            # 保存済み / 未保存 (user 2026-11-28): each file's own save
+            # state; 未保存 → 「保存しますか？」 → the Save dialog
+            sv = QToolButton()
+            sv.setAutoRaise(False)
+            sv.setVisible(False)
+            sv.clicked.connect(lambda _=False, k=kind: self._ct_file_save_clicked(k))
+            row.addWidget(sv)
             self._ct_file_lbls[kind] = lb
             self._ct_unload_btns[kind] = b
+            self._ct_file_save_btns[kind] = sv
         row.addSpacing(6)                        # the territory file's own
         row.addWidget(self._ct_terr_load_btn)    # Load / Save
         row.addWidget(self._ct_terr_save_btn)
@@ -604,6 +613,64 @@ class CTModeBarMixin:
         cap = getattr(self, "_ct_files_lbl", None)
         return ((cap.text() if cap is not None else "")
                 + " &nbsp;／&nbsp; ".join(parts))
+
+    #: the per-file save button: 保存済み (green, inert) / 未保存 (orange)
+    _CT_SAVED_CSS = ("QToolButton{color:#2e7d32; border:1px solid #9ccc9c;"
+                     " border-radius:3px; padding:0 4px; background:#eef7ee;}")
+    _CT_UNSAVED_CSS = ("QToolButton{color:white; font-weight:bold;"
+                       " border:1px solid #c05a00; border-radius:3px;"
+                       " padding:0 4px; background:#e67e22;}"
+                       "QToolButton:hover{background:#d35400;}")
+    _CT_FILE_NAMES = {"full": "FullLv", "tree": "corotree",
+                      "terr": "territory"}
+
+    def _ct_file_save_sync(self, kind: str, present: bool,
+                           unsaved: bool) -> None:
+        """Show the 保存済み / 未保存 button of one readout part (hidden when
+        there is nothing of that kind, or it is Unloaded)."""
+        sv = (getattr(self, "_ct_file_save_btns", None) or {}).get(kind)
+        if sv is None:
+            return
+        sv.setVisible(bool(present))
+        if not present:
+            return
+        sv.setProperty("ct_unsaved", bool(unsaved))
+        txt = t("未保存") if unsaved else t("保存済み")
+        if sv.text() != txt:
+            sv.setText(txt)
+        sv.setStyleSheet(self._CT_UNSAVED_CSS if unsaved
+                         else self._CT_SAVED_CSS)
+        sv.setToolTip(
+            t("{n} は未保存です。クリックで保存します（保存先とファイル名を選べます。"
+              "上書きするときは一つ前の版を .bak で残します）",
+              n=self._CT_FILE_NAMES.get(kind, kind)) if unsaved
+            else t("{n} は保存済みです", n=self._CT_FILE_NAMES.get(kind, kind)))
+
+    def _ct_file_save_clicked(self, kind: str) -> None:
+        """未保存 → 「保存しますか？」 Yes → that file's Save dialog (name /
+        place). 保存済み → nothing."""
+        from PyQt6.QtWidgets import QMessageBox
+        sv = (getattr(self, "_ct_file_save_btns", None) or {}).get(kind)
+        if sv is None or not sv.property("ct_unsaved"):
+            return
+        name = self._CT_FILE_NAMES.get(kind, kind)
+        if QMessageBox.question(
+                self.window(), t("保存"),
+                t("{n} を保存しますか？", n=name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if kind == "full":
+                self._full_lv_save()
+            else:
+                shell = self._ct_mode_shell()
+                if shell is not None and hasattr(shell, "ct_file_save"):
+                    shell.ct_file_save(self, kind)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        self.refresh_ct_mode_bar()
 
     def _ct_unload_clicked(self, kind: str) -> None:
         """⊗ next to a loaded file: Unload it — its data is kept but nothing of
@@ -849,6 +916,15 @@ class CTModeBarMixin:
                             else t("このファイルをUnload（表示しない）"))
                         b_.setProperty("ct_icon_set", True)
                     b_.setVisible(bool(is_file) or now)
+                # 保存済み / 未保存 (not for なし, nor an Unloaded file)
+                present = bool(text) and not grey
+                if kind == "full":
+                    unsaved = bool(modified) or (
+                        present and not is_file
+                        and not getattr(self, "_full_lv_saved", False))
+                else:
+                    unsaved = bool(modified) or (present and not is_file)
+                self._ct_file_save_sync(kind, present, unsaved)
         self._ctlv_sync()
 
     def _ct_mode_clicked(self, key: str) -> None:

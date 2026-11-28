@@ -16313,6 +16313,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             full, err = (full_lv.build(epi, bld) if bld is not None
                          else (None, t("Blood/Endo build failed")))
             if full is not None:
+                from multi_dicomviewer.core.file_backup import backup_existing
+                backup_existing(path)            # the previous version → .bak
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(full, f, ensure_ascii=False)
                 self._full_lv_saved = True   # flip FullLV button to its saved colour
@@ -20119,6 +20121,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_batch_btn.setStyleSheet(self._BTN_DIS)   # grey when off
         self._cpr_batch_btn.clicked.connect(self._coro_batch_extend)
         row.addWidget(self._cpr_batch_btn)
+        # 全冠動脈描出 (user 2026-11-28): the ostia by hand, then every
+        # coronary line at once (inside the LV Epi shell + the RCA corridor)
+        self._cpr_autotree_btn = FitButton(t("全冠動脈描出"))
+        self._cpr_autotree_btn.setHelpToolTip(t(
+            "全冠動脈描出：LM（または LAD・LCX）と RCA の起始部をセンターライン"
+            "交点で順に設定すると、左室 Epi 面のすぐ外側（RCA 近位〜中部は右房室"
+            "間溝の範囲）で、起始部から内腔がつながる冠動脈をすべて自動で描出し"
+            "ます。Epi 面の近くで、起始部とつながらない管状構造は「未接続」の線"
+            "になります（閉塞血管の候補）"))
+        self._cpr_autotree_btn.clicked.connect(self._coro_auto_tree)
+        row.addWidget(self._cpr_autotree_btn)
         # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
         # _cpr_vr_build_group, built in _build_lv_bar.)
         # Fit / Snap buttons REMOVED (user 2026-11-16): every edit point is
@@ -20243,12 +20256,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_first_ctrl_btn.clicked.connect(
             lambda: self._cpr_bar_ctrl_end(False))
         srow.addWidget(self._cpr_first_ctrl_btn)
-        self._cpr_prev_ctrl_btn = FitButton("◀")
+        self._cpr_prev_ctrl_btn = FitButton("◀(A)")   # key shown (user 2026-11-28)
         self._cpr_prev_ctrl_btn.setHelpToolTip(
             t("シークバー上で左隣のCPR編集点へ移動（調整用、A）"))
         self._cpr_prev_ctrl_btn.clicked.connect(lambda: self._cpr_bar_step_ctrl(-1))
         srow.addWidget(self._cpr_prev_ctrl_btn)
-        self._cpr_next_ctrl_btn = FitButton("▶")
+        self._cpr_next_ctrl_btn = FitButton("▶(F)")
         self._cpr_next_ctrl_btn.setHelpToolTip(
             t("シークバー上で右隣のCPR編集点へ移動（調整用、F）"))
         self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_bar_step_ctrl(+1))
@@ -20340,6 +20353,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if getattr(self, "_cpr_batch_btn", None) is not None:
             # 一括描出: greyed out while drawing (user 2026-11-25)
             self._cpr_batch_btn.setEnabled(not pend)
+        if getattr(self, "_cpr_autotree_btn", None) is not None:
+            self._cpr_autotree_btn.setEnabled(not pend)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()
