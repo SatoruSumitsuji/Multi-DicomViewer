@@ -2705,8 +2705,18 @@ class CPRMixin:
 
         print("[autotree] clicked", file=sys.stderr, flush=True)
         if getattr(self, "_coronary_mpr_pending", False):
-            return stop(t("描画中です。右クリックで線を確定してから"
-                          "「全冠動脈描出」を押してください。"))
+            d = getattr(self, "_draft", None)
+            if isinstance(d, dict) and len(d.get("pts") or []) >= 1:
+                return stop(t("描画中です。右クリックで線を確定してから"
+                              "「全冠動脈描出」を押してください。"))
+            # Draw armed but nothing traced yet (CoronaryTreeモード arms it
+            # on entry) → disarm it and go on
+            self._coronary_mpr_pending = False
+            try:
+                self._cpr_vr_stop()
+            except Exception:                            # noqa: BLE001
+                pass
+            self._coronary_sync_ui()
         shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
                  else None)
         if shell is None or not hasattr(shell, "coronary_auto_tree"):

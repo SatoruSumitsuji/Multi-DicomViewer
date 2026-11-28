@@ -20366,7 +20366,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # 一括描出: greyed out while drawing (user 2026-11-25)
             self._cpr_batch_btn.setEnabled(not pend)
         if getattr(self, "_cpr_autotree_btn", None) is not None:
-            self._cpr_autotree_btn.setEnabled(not pend)
+            # stays clickable while Draw is armed (user 2026-11-28:
+            # CoronaryTreeモード arms Draw at once, so it was never usable);
+            # the click disarms an empty Draw (see _coro_auto_tree)
+            self._cpr_autotree_btn.setEnabled(True)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()

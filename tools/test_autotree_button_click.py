@@ -63,10 +63,30 @@ if d is not None:
     c = v.mapToGlobal(v.rect().center())
     check("… over the CT pane", d.geometry().contains(c), (d.geometry(), c))
     d.close()
+# CoronaryTreeモード arms Draw at once: the button stays usable, the empty
+# Draw is disarmed and the ostium window opens (user 2026-11-28)
+v._coronary_mode = True
 v._coronary_mpr_pending = True
+v._draft = None
+v._coronary_sync_ui()
+check("Draw armed (nothing traced): the button stays enabled", b.isEnabled())
+m._autotree_dlg = None
+b.click()
+for _ in range(3):
+    app.processEvents()
+d = getattr(m, "_autotree_dlg", None)
+check("… click → Draw disarmed + the ostium window", d is not None
+      and d.isVisible() and not v._coronary_mpr_pending and not boxes, boxes)
+if d is not None:
+    d.close()
+# a line half drawn → told to finish it first (not lost)
+v._coronary_mpr_pending = True
+v._draft = {"type": "polyline", "pane": "A", "pts": [np.zeros(3), np.ones(3)]}
 v._coro_auto_tree()
-check("while drawing → told in a box (not silent)", len(boxes) == 1, boxes)
+check("line in progress → told in a box, Draw kept", len(boxes) == 1
+      and v._coronary_mpr_pending, boxes)
 v._coronary_mpr_pending = False
+v._draft = None
 m._autotree_dlg = None
 v2 = ctv.CTViewer()
 v2.setParent(pane)
