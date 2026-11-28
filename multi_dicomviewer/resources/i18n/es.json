@@ -1811,6 +1811,8 @@
   "全冠動脈描出": "Extracción de todo el árbol",
   "全冠動脈描出でエラーが発生しました: {e}": "Error en la extracción del árbol: {e}",
   "全冠動脈描出を停止しました。": "Extracción del árbol detenida.",
+  "全冠動脈描出を開始できません（CT 画像が読み込まれていません）。": "No se puede iniciar la extracción del árbol (no hay ninguna imagen de TC cargada).",
+  "全冠動脈描出を開始できません（メイン画面が見つかりません）。": "No se puede iniciar la extracción del árbol (no se encontró la ventana principal).",
   "全冠動脈描出：LM（または LAD・LCX）と RCA の起始部をセンターライン交点で順に設定すると、左室 Epi 面のすぐ外側（RCA 近位〜中部は右房室間溝の範囲）で、起始部から内腔がつながる冠動脈をすべて自動で描出します。Epi 面の近くで、起始部とつながらない管状構造は「未接続」の線になります（閉塞血管の候補）": "Extracción de todo el árbol: fije los ostium del TCI (o DA / Cx) y de la CD con el cruce de líneas, uno tras otro; se dibujan automáticamente todas las coronarias cuya luz conecta con un ostium, justo fuera del Epi del VI (la CD proximal–media en el surco AV derecho). Un tubo cerca del Epi sin conexión queda como línea sin conectar (candidato a vaso ocluido).",
   "全冠動脈描出：{n} 本（幹 {r} / 枝 {b} / 未接続 {u}）を登録しました。役割・名前を確認し、必要なら線を修正してください。": "Extracción del árbol: {n} líneas registradas (troncos {r} / ramas {b} / sin conectar {u}). Revise funciones y nombres y corrija las líneas si hace falta.",
   "全冠動脈描出：{s}…": "Extracción de todo el árbol: {s}…",

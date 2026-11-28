@@ -608,6 +608,8 @@
   "全冠動脈描出": "Whole-tree extraction",
   "全冠動脈描出でエラーが発生しました: {e}": "Whole-tree extraction failed: {e}",
   "全冠動脈描出を停止しました。": "Whole-tree extraction stopped.",
+  "全冠動脈描出を開始できません（CT 画像が読み込まれていません）。": "Whole-tree extraction cannot start (no CT image is loaded).",
+  "全冠動脈描出を開始できません（メイン画面が見つかりません）。": "Whole-tree extraction cannot start (the main window was not found).",
   "全冠動脈描出：LM（または LAD・LCX）と RCA の起始部をセンターライン交点で順に設定すると、左室 Epi 面のすぐ外側（RCA 近位〜中部は右房室間溝の範囲）で、起始部から内腔がつながる冠動脈をすべて自動で描出します。Epi 面の近くで、起始部とつながらない管状構造は「未接続」の線になります（閉塞血管の候補）": "Whole-tree extraction: set the LM (or LAD / LCX) and RCA ostia at the centreline crossing one after another; every coronary artery whose lumen connects to an ostium is then drawn automatically just outside the LV Epi (the proximal–mid RCA in the right AV groove). A tube near the Epi not connected to an ostium becomes an unconnected line (an occluded-vessel candidate).",
   "全冠動脈描出：{n} 本（幹 {r} / 枝 {b} / 未接続 {u}）を登録しました。役割・名前を確認し、必要なら線を修正してください。": "Whole-tree extraction: {n} lines registered (trunks {r} / branches {b} / unconnected {u}). Check the roles and names and correct lines where needed.",
   "全冠動脈描出：{s}…": "Whole-tree extraction: {s}…",

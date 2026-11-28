@@ -2690,15 +2690,38 @@ class CPRMixin:
     def _coro_auto_tree(self):
         """「全冠動脈描出」 (user 2026-11-28): set the ostia, then extract the
         whole coronary tree (see MainWindow.coronary_auto_tree)."""
-        if getattr(self, "_coronary_mpr_pending", False):
-            self._cpr_autotrack_hint(t("描画中です。右クリックで線を確定してから"
-                                       "「全冠動脈描出」を押してください。"))
+        import sys
+        import traceback
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        def stop(msg):
+            # never silent (user 2026-11-28: the click did nothing): the
+            # reason in a box, the status bar and the console
+            print("[autotree] " + msg, file=sys.stderr, flush=True)
+            self._cpr_autotrack_hint(msg)
+            QMessageBox.information(self.window(), t("全冠動脈描出"), msg)
             return None
+
+        print("[autotree] clicked", file=sys.stderr, flush=True)
+        if getattr(self, "_coronary_mpr_pending", False):
+            return stop(t("描画中です。右クリックで線を確定してから"
+                          "「全冠動脈描出」を押してください。"))
         shell = (self._ct_mode_shell() if hasattr(self, "_ct_mode_shell")
                  else None)
         if shell is None or not hasattr(shell, "coronary_auto_tree"):
-            return None
-        return shell.coronary_auto_tree(self)
+            return stop(t("全冠動脈描出を開始できません（メイン画面が見つかりません）。"))
+        try:
+            dlg = shell.coronary_auto_tree(self)
+        except Exception as e:                           # noqa: BLE001
+            traceback.print_exc()
+            return stop(t("全冠動脈描出でエラーが発生しました: {e}", e=e))
+        if dlg is None:
+            return stop(t("全冠動脈描出を開始できません（CT 画像が読み込まれていません）。"))
+        print("[autotree] ostium window at "
+              f"{dlg.geometry().getRect()} visible={dlg.isVisible()}",
+              file=sys.stderr, flush=True)
+        return dlg
 
     def _cpr_autotrack_ok(self, which, mi, vi) -> bool:
         """Auto-Track on the distal edit point of a CPR line."""

@@ -4230,8 +4230,16 @@ class MainWindow(QMainWindow):
         dlg = OstiaDialog(self, here,
                           lambda ost: self.coronary_auto_tree_run(viewer, ost))
         self._autotree_dlg = dlg
+        dlg.adjustSize()
+        # over the CT pane (not wherever the window manager puts it)
+        try:
+            c = viewer.mapToGlobal(viewer.rect().center())
+            dlg.move(c.x() - dlg.width() // 2, c.y() - dlg.height() // 2)
+        except Exception:                                # noqa: BLE001
+            pass
         dlg.show()
         dlg.raise_()
+        dlg.activateWindow()
         return dlg
 
     def _autotree_epi(self, viewer):

@@ -3931,7 +3931,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "間溝の範囲）で、起始部から内腔がつながる冠動脈をすべて自動で描出し"
             "ます。Epi 面の近くで、起始部とつながらない管状構造は「未接続」の線"
             "になります（閉塞血管の候補）"))
-        self._cpr_autotree_btn.clicked.connect(self._coro_auto_tree)
+        self._cpr_autotree_btn.clicked.connect(
+            lambda _c=False: self._coro_auto_tree())
         row.addWidget(self._cpr_autotree_btn)
         # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
         # _cpr_vr_build_group, built in _build_lv_bar.)
@@ -5928,6 +5929,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if getattr(self, "_lv_epi_draw_btn", None) is not None:
             self._lv_epi_draw_btn.setVisible(sm == "epi")
             self._lv_epi_draw_btn.setEnabled(sm == "epi")
+            # Coloured (Epi green) once Draw has started the trace (user
+            # 2026-11-28: after the dialog's Draw the row-3 Draw stayed plain,
+            # so it looked as if it still had to be pressed).
+            _drawing = bool(sm == "epi" and self._lv is not None
+                            and self._lv_epi_armed_now())
+            if bool(self._lv_epi_draw_btn.property("drawing")) != _drawing \
+                    or self._lv_epi_draw_btn.property("drawing") is None:
+                self._lv_epi_draw_btn.setProperty("drawing", _drawing)
+                self._lv_epi_draw_btn.setStyleSheet(
+                    self._LV_STY["epi"] if _drawing
+                    else self._LV_STY.get("off", ""))
         if sm == "epi" and not self._lv_epi_armed_now():
             for b in (self._lv_trace_btn, self._lv_prev_btn,
                       self._lv_next_btn, self._lv_sax_btn):
