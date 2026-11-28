@@ -4242,6 +4242,35 @@ class MainWindow(QMainWindow):
         dlg.activateWindow()
         return dlg
 
+    @staticmethod
+    def _autotree_save_log(folder, res, ostia):
+        """autotree_log.json in the AutoTree folder: the numbers of the run
+        (thresholds, counts per stage, parameters, the ostium points in mm)
+        for tuning on real cases — no patient data."""
+        import json
+        import os
+        from dataclasses import asdict
+        from multi_dicomviewer.core.coronary_autotree import AutoTreeParams
+        try:
+            rec = {"format": "MDV-AutoTree-log", "log": res.log,
+                   "stop": res.stop,
+                   "ostia": [{"role": r, "mm": [round(float(v), 2)
+                                                for v in p]}
+                             for r, p in ostia],
+                   "lines": [{"role": v.role, "parent": v.parent,
+                              "connected": v.connected,
+                              "length_mm": round(float(v.length_mm), 1)}
+                             for v in res.vessels],
+                   "params": asdict(AutoTreeParams())}
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, "autotree_log.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False, indent=1,
+                          default=lambda o: o.tolist() if hasattr(o, "tolist")
+                          else str(o))
+        except Exception:                                # noqa: BLE001
+            traceback.print_exc()
+
     def _autotree_epi(self, viewer):
         """(epi bool zyx, origin mm, apex, axis_dir) of *viewer*'s CT — the
         in-session Epi, else the docked FullLv's — or None."""
@@ -4342,6 +4371,7 @@ class MainWindow(QMainWindow):
         stages = {"ROI": t("範囲を準備中"), "Epi": t("Epi 面からの距離を計算中"),
                   "space": t("探索範囲を作成中"), "lumen": t("内腔を抽出中"),
                   "gaps": t("途切れをつなぎ中"), "centreline": t("中心線を作成中"),
+                  "extend": t("途切れた先を Auto-Track で延長中"),
                   "unconnected": t("未接続血管を探索中")}
         try:
             panes = getattr(viewer, "pane", None) or {}
@@ -4377,6 +4407,7 @@ class MainWindow(QMainWindow):
             return None
         out = w.install_auto_tree(res.vessels, folder, series=series,
                                   src_dir=src_dir, replace=replace)
+        self._autotree_save_log(folder, res, ostia)
         self.coronary_overlay_refresh()
         self.refresh_ct_mode_bars()
         if hasattr(viewer, "_ct_mode_auto"):

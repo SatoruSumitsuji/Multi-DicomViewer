@@ -38,6 +38,7 @@ def check(name, ok, info=""):
 
 
 from tools.autotree_phantom import *  # noqa: E402,F401,F403
+from tools.autotree_phantom import PHANTOM  # noqa: E402
 
 
 t0 = time.time()
@@ -96,6 +97,39 @@ check("branches start ON their parent line", all(
 check("parents come before their children",
       all(v.parent is None or v.parent < v.key for v in V))
 check("reasonable time on a 100×100×125 mm CT", dt < 90, f"{dt:.1f}s")
+
+# ---- the real-case troubles (user 2026-11-28) -----------------------------
+if "RCA" in roles:
+    e = roles["RCA"].points[-1]
+    check("RCA continued past the 7 mm faint stretch (Auto-Track) to the PD",
+          e[2] < 52, (e, res.log.get("extended")))
+conn_p = np.vstack([v.points for v in V if v.connected])
+lcxc = np.asarray(lcx)
+
+
+def _near(P, Q, tol):
+    return np.min(np.linalg.norm(P[:, None, :] - Q[None], axis=2), axis=1) < tol
+
+
+g = np.vstack([np.linspace(a_, b_, 8) for a_, b_ in zip(gcv[:-1], gcv[1:])])
+on_gcv = _near(conn_p, g, 1.0) & ~_near(conn_p, lcxc, 4.0)
+check("the great cardiac vein is not taken (crossing the LCX)",
+      on_gcv.sum() * 0.5 < 5.0, int(on_gcv.sum()))
+rr_ = np.linalg.norm(allp[:, :2] - [CX, CY], axis=1)
+oncap = (allp[:, 2] > 81.5) & (rr_ < 12) & \
+    (np.linalg.norm(allp - LM0, axis=1) > 10)
+check("nothing on the base cap (LA floor)", not oncap.any(), allp[oncap][:3])
+check("nothing in the left atrium / right ventricle",
+      not (PHANTOM["la"][iz, iy, ix].any() or PHANTOM["rv"][iz, iy, ix].any()))
+shz, shy, shx = np.nonzero(PHANTOM["sheet"])
+shc = np.c_[shx, shy, shz] * S
+on_sheet = [v for v in V if v.connected and v.role == "branch"
+            and _near(v.points, shc[::7], 1.0).mean() > 0.5]
+check("a thin bright sheet on the LAD is not a branch (plate)", not on_sheet,
+      [(round(v.length_mm), res.log.get("judged")) for v in on_sheet])
+oc = np.vstack(outer)
+check("the tube 6-7.5 mm outside the Epi is not taken / not 未接続",
+      not _near(allp, oc, 1.5).any())
 
 # no Epi → lumen continuity only (still finds the arteries from the ostia)
 r2 = extract_coronary_tree(vol, (S, S, S), [("LM", LM0), ("RCA", RC0)])

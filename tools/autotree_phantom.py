@@ -2,7 +2,10 @@
 """A synthetic heart CT for the 全冠動脈描出 tests (no patient data):
 an LV (half ellipsoid, apex at the bottom), an aorta, LM → LAD (a short
 stenosis gap) + LCX + a diagonal, an RCA outside the LV Epi down to a PD,
-a darker vein along the LAD and an occluded bright segment on the Epi.
+a darker vein along the LAD and an occluded bright segment on the Epi;
+a right ventricle the RCA touches, a left atrium, a great cardiac vein
+crossing the LCX, a 7 mm faint stretch in the PD, a bright tube on the
+base cap and one 6-7.5 mm outside the Epi (the real-case troubles).
 Imported by tools/test_coronary_autotree.py / test_autotree_flow.py."""
 import numpy as np
 
@@ -65,18 +68,49 @@ RC0 = np.array([60.7, 62.0, 92.0])          # right ostium
 rca = [RC0, np.array([70.0, 72.0, 88.0])] + \
     [surf(th, 84.0, off=14.0) for th in np.arange(50, -91, -8.0)] + \
     [surf(-90, z, off=2.0) for z in np.arange(80, 44, -3.0)]
+# chambers the vessels pass (user 2026-11-28 real-case troubles): a right
+# ventricle just under the RCA (a contact), a left atrium above the base
+rv = (((xx - CX - 40) / 11.0) ** 2 + ((yy - CY + 8) / 20.0) ** 2
+      + ((zz - 66.0) / 15.6) ** 2) <= 1.0
+vol[rv] = 420.0
+la = (xx - CX + 12) ** 2 + (yy - CY + 14) ** 2 + (zz - 99.0) ** 2 <= 14.0 ** 2
+vol[la] = 420.0
 tube(lm, 2.2, 420.0)
 tube(lad, 1.5, 420.0, gap=(46.0, 47.6, 190.0))     # a short stenosis
 tube(lcx, 1.4, 420.0)
 tube(diag, 1.1, 420.0)
-tube(rca, 1.6, 420.0)
+tube(rca, 1.6, 420.0, gap=(59.0, 66.0, 200.0))     # a 7 mm faint stretch (PD)
+# the great cardiac vein: 5 mm above the LCX, crossing it at 200 deg,
+# widening toward the crux, a little darker (late arterial phase)
+gcv = [surf(th, 86.0 - 4.1 * np.exp(-((th - 200.0) / 10.0) ** 2))
+       for th in np.arange(150, 266, 3.0)]
+for k in range(len(gcv) - 1):
+    tube(gcv[k:k + 2], 1.3 + 1.3 * k / (len(gcv) - 1), 330.0)
+# a bright tube lying on the base cap (LA floor / annulus), from the LM fork
+captube = [BIF, np.array([50.0, 52.0, 83.0])]
+tube(captube, 1.1, 420.0)
+# a bright tube 6-7.5 mm outside the lateral Epi (not a coronary)
+outer = [surf(180, z, off=6.5 + (70 - z) / 30.0) for z in np.arange(70, 38, -2.0)]
+tube(outer, 1.2, 400.0)
 vein = [surf(128, z, off=2.2) for z in np.arange(79, 22, -3.0)]
 tube(vein, 1.6, 200.0)                       # darker: not an artery
 occl = [surf(-20, z) for z in np.arange(68, 38, -2.0)]
 tube(occl, 1.3, 400.0)                       # occluded vessel, collateral filled
+# a thin bright sheet touching the LAD (an atrial wall rim / trabeculae
+# stand-in): plate-like, not a branch
+_t = np.degrees(np.arctan2(yy - CY, xx - CX))
+_q = 1.0 - ((zz - ZB) / (ZB - ZA)) ** 2
+_re = RE * np.sqrt(np.clip(_q, 0.0, None))
+_rr = np.hypot(xx - CX, yy - CY)
+sheet = ((_t >= 72) & (_t <= 99) & (zz >= 64) & (zz <= 74)
+         & (_rr >= _re + 1.4) & (_rr <= _re + 2.6))
+vol[sheet] = 420.0
+del _t, _q, _re, _rr
 rng = np.random.default_rng(3)
 vol += rng.normal(0, 12, vol.shape).astype(np.float32)
 
 PHANTOM = dict(vol=vol, S=S, epi=epi, endo=endo, LM0=LM0, RC0=RC0,
                apex=np.array([CX, CY, ZA]), CX=CX, CY=CY, ZA=ZA, RE=RE,
-               NX=NX, NY=NY, NZ=NZ, occl=occl, vein=vein)
+               NX=NX, NY=NY, NZ=NZ, occl=occl, vein=vein, gcv=gcv,
+               captube=captube, outer=outer, BIF=BIF, rv=rv, la=la, lcx=lcx,
+               rca=rca, sheet=sheet)

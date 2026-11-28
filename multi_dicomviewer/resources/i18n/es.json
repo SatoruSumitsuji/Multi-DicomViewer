@@ -2163,6 +2163,7 @@
   "追跡済みの線に当たった": "alcanzó una línea ya trazada",
   "追跡済みの線の上: {k} 個": "sobre una línea ya trazada: {k}",
   "透過度": "Transparencia",
+  "途切れた先を Auto-Track で延長中": "continuando los extremos cortados con Auto-Track",
   "途切れをつなぎ中": "uniendo interrupciones cortas",
   "造影が弱い": "contraste débil",
   "造影が薄い: {k} 個（最高 {a:.0f} HU < 必要 {b:.0f} HU）": "demasiado tenue: {k} (máx. {a:.0f} HU < necesario {b:.0f} HU)",

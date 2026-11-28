@@ -960,6 +960,7 @@
   "追跡済みの線に当たった": "ran into a traced line",
   "追跡済みの線の上: {k} 個": "on an already traced line: {k}",
   "透過度": "Transparency",
+  "途切れた先を Auto-Track で延長中": "continuing cut-off ends with Auto-Track",
   "途切れをつなぎ中": "joining short gaps",
   "造影が弱い": "weak contrast",
   "造影が薄い: {k} 個（最高 {a:.0f} HU < 必要 {b:.0f} HU）": "too faint: {k} (best {a:.0f} HU < needed {b:.0f} HU)",

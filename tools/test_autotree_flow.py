@@ -209,6 +209,7 @@ w2 = CoronaryTreeWindow(None)
 class Shell(QWidget):
     coronary_auto_tree_run = MainWindow.coronary_auto_tree_run
     _autotree_epi = MainWindow._autotree_epi
+    _autotree_save_log = staticmethod(MainWindow._autotree_save_log)
     _corotree_win = w2
 
     def _open_coronary_tree(self):
@@ -241,9 +242,18 @@ check("end to end: LM / LAD / LCX / RCA registered", r2 == ["LAD", "LCX", "LM", 
 check("end to end: one 未接続 line (the occluded segment)",
       len(t2.unconnected()) == 1, len(t2.unconnected()))
 sub_d = [d for d in os.listdir(E2E) if d.startswith("AutoTree_")]
-check("files in a new AutoTree_<date> folder",
-      len(sub_d) == 1 and len(os.listdir(os.path.join(E2E, sub_d[0])))
-      == len(t2.vessels), sub_d)
+fl = sorted(os.listdir(os.path.join(E2E, sub_d[0]))) if sub_d else []
+check("files in a new AutoTree_<date> folder (+ autotree_log.json)",
+      len(sub_d) == 1 and len([f for f in fl if f.endswith(".cpr.json")])
+      == len(t2.vessels) and "autotree_log.json" in fl, fl)
+if "autotree_log.json" in fl:
+    with open(os.path.join(E2E, sub_d[0], "autotree_log.json"),
+              encoding="utf-8") as f:
+        lg = json.load(f)
+    check("… the log: thresholds, stages, parameters, lines (no patient data)",
+          lg.get("format") == "MDV-AutoTree-log" and "thr_hu" in lg["log"]
+          and "judged" in lg["log"] and "params" in lg
+          and len(lg["lines"]) == len(t2.vessels), sorted(lg))
 check("the stages were shown, the result reported",
       progs and any(s == "autotree" for s, _n in progs[0].stages)
       and results and results[-1][0], results[-1:] if results else None)
